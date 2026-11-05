@@ -3,11 +3,12 @@
     Powered by Rayfield Interface Suite (Official GitHub)
     Target: Roblox Bloxstrike (7633926880)
     Architecture:
-      - Memory & Controller Recoil Suppression (CameraController Hook)
-      - Instantaneous Bullet Cam-Flick & Network Dispatch Restoration (True Silent Aim)
-      - Real-Time Direct Entity ESP (Workspace.Characters Live Rigs, Zero Lag)
+      - Clean Lobby Isolation (Zero interference with Matchmaking & Play button)
+      - Dynamic Match Engine Hooking (On-demand attachment when spawned in match)
+      - Synchronous Gun/Bullet Silent Aim (Flick on bullet create, restore on shoot end)
+      - Native Module Controller Recoil & Spread Suppression
+      - Real-Time Direct Entity ESP (Workspace.Characters Live Rigs, 200 FPS)
       - Snappy Hard-Lock Aim Assist
-      - Zero Raycast Pollution (Native Engine Ground & Buy-Zone Checks Untouched)
       - Rayfield UI Hub (Toggle with [K])
 ]]
 
@@ -79,22 +80,14 @@ local Runtime = {
     C4Drawing = nil,
     Connections = {},
     Hooks = {},
+    HooksInstalled = false,
+    LastHooksAttempt = 0,
     LastC4Check = 0,
     CachedC4 = nil,
     ViewSaved = nil,
     CombatantsCache = {},
     LastCombatantsUpdate = 0
 }
-
--- Safe hook utility function
-local function SafeHook(fn, replacement)
-    if type(fn) ~= "function" or not hookfunction then return nil end
-    local ok, orig = pcall(hookfunction, fn, replacement)
-    if ok and type(orig) == "function" then
-        return orig
-    end
-    return nil
-end
 
 -- Shared Raycast Params for Wallcheck (Zero Allocations)
 local WallParams = RaycastParams.new()
@@ -244,13 +237,13 @@ local function LocateC4()
     return Runtime.CachedC4
 end
 
--- Fast Wallcheck (Single raycast only for candidate)
+-- Fast Wallcheck (Candidate raycast only)
 local function CheckVisible(part, origin)
     if not Config.Combat.VisibleCheck then return true end
     origin = origin or Camera.CFrame.Position
     local dir = part.Position - origin
 
-    local myChar = LocalPlayer.Character or (Workspace:FindFirstChild("Characters") and Workspace.Characters:FindFirstChild(LocalPlayer.Name))
+    local myChar = (Workspace:FindFirstChild("Characters") and Workspace.Characters:FindFirstChild(LocalPlayer.Name)) or LocalPlayer.Character
     WallParams.FilterDescendantsInstances = {Camera, myChar}
     local hit = Workspace:Raycast(origin, dir, WallParams)
     if hit and hit.Instance:IsDescendantOf(part.Parent) then
@@ -270,7 +263,7 @@ local function UpdateCombatantsCache()
     local list = {}
     local seen = {}
 
-    -- 1. Scan Bloxstrike Characters folder (Primary real-time rigs)
+    -- 1. Scan Bloxstrike Characters folder (Live round combatant rigs)
     local chars = Workspace:FindFirstChild("Characters")
     if chars then
         for _, model in ipairs(chars:GetChildren()) do
@@ -290,30 +283,6 @@ local function UpdateCombatantsCache()
                         Root = root,
                         Humanoid = hum,
                         Player = Players:FindFirstChild(id)
-                    })
-                end
-            end
-        end
-    end
-
-    -- 2. Fallback: Players list (for spectating or non-standard spawns)
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and not seen[player.Name] then
-            local char = player.Character
-            if char and char:IsA("Model") then
-                local head = char:FindFirstChild("Head")
-                local root = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso")
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                local dead = (hum and hum.Health <= 0) or tostring(player:GetAttribute("Dead")) == "true" or tostring(char:GetAttribute("Dead")) == "true"
-
-                if head and root and not dead then
-                    table.insert(list, {
-                        Id = player.Name,
-                        Model = char,
-                        Head = head,
-                        Root = root,
-                        Humanoid = hum,
-                        Player = player
                     })
                 end
             end
@@ -353,205 +322,131 @@ local function SelectTarget(combatants)
     return best, bestPart
 end
 
--- ==========================================
--- BLOXSTRIKE RECOIL & SILENT AIM ENGINE
--- ==========================================
+-- ========================================================
+-- ON-DEMAND DYNAMIC MATCH HOOKS (Zero Lobby Interference)
+-- ========================================================
 
--- 1. Hook CameraController (Weapon Kick, Recoil, Rotation)
-local function HookRecoilController()
-    local Controllers = ReplicatedStorage:FindFirstChild("Controllers")
-    local CamControllerModule = Controllers and Controllers:FindFirstChild("CameraController")
-    if CamControllerModule and CamControllerModule:IsA("ModuleScript") then
-        local ok, camModule = pcall(require, CamControllerModule)
+-- 1. Recoil Controller Hook (Suppresses recoil without touching remotes/network)
+local function TryHookRecoil()
+    if Runtime.Hooks["weaponKick"] then return end
+    local controllers = ReplicatedStorage:FindFirstChild("Controllers")
+    local camControllerModule = controllers and controllers:FindFirstChild("CameraController")
+    if camControllerModule and camControllerModule:IsA("ModuleScript") then
+        local ok, camModule = pcall(require, camControllerModule)
         if ok and type(camModule) == "table" then
             if type(camModule.weaponKick) == "function" then
-                local origKick
-                origKick = SafeHook(camModule.weaponKick, function(...)
+                local oldKick = camModule.weaponKick
+                camModule.weaponKick = function(...)
                     if Config.WeaponMods.NoRecoil then return end
-                    return origKick(...)
-                end)
-                if origKick then
-                    table.insert(Runtime.Hooks, function() pcall(hookfunction, camModule.weaponKick, origKick) end)
-                else
-                    local old = camModule.weaponKick
-                    camModule.weaponKick = function(...)
-                        if Config.WeaponMods.NoRecoil then return end
-                        return old(...)
-                    end
-                    table.insert(Runtime.Hooks, function() camModule.weaponKick = old end)
+                    return oldKick(...)
                 end
+                Runtime.Hooks["weaponKick"] = function() camModule.weaponKick = oldKick end
             end
 
             if type(camModule.setWeaponRecoil) == "function" then
-                local origRecoil
-                origRecoil = SafeHook(camModule.setWeaponRecoil, function(...)
+                local oldRecoil = camModule.setWeaponRecoil
+                camModule.setWeaponRecoil = function(...)
                     if Config.WeaponMods.NoRecoil then return end
-                    return origRecoil(...)
-                end)
-                if origRecoil then
-                    table.insert(Runtime.Hooks, function() pcall(hookfunction, camModule.setWeaponRecoil, origRecoil) end)
-                else
-                    local old = camModule.setWeaponRecoil
-                    camModule.setWeaponRecoil = function(...)
-                        if Config.WeaponMods.NoRecoil then return end
-                        return old(...)
-                    end
-                    table.insert(Runtime.Hooks, function() camModule.setWeaponRecoil = old end)
+                    return oldRecoil(...)
                 end
+                Runtime.Hooks["setWeaponRecoil"] = function() camModule.setWeaponRecoil = oldRecoil end
             end
 
             if type(camModule.getWeaponKickRotation) == "function" then
-                local origRot
-                origRot = SafeHook(camModule.getWeaponKickRotation, function(...)
+                local oldRotation = camModule.getWeaponKickRotation
+                camModule.getWeaponKickRotation = function(...)
                     if Config.WeaponMods.NoRecoil then return Vector3.zero end
-                    return origRot(...)
-                end)
-                if origRot then
-                    table.insert(Runtime.Hooks, function() pcall(hookfunction, camModule.getWeaponKickRotation, origRot) end)
-                else
-                    local old = camModule.getWeaponKickRotation
-                    camModule.getWeaponKickRotation = function(...)
-                        if Config.WeaponMods.NoRecoil then return Vector3.zero end
-                        return old(...)
-                    end
-                    table.insert(Runtime.Hooks, function() camModule.getWeaponKickRotation = old end)
+                    return oldRotation(...)
                 end
+                Runtime.Hooks["getWeaponKickRotation"] = function() camModule.getWeaponKickRotation = oldRotation end
             end
         end
     end
 end
-pcall(HookRecoilController)
 
--- 2. Resolve Remotes ModuleScript
-local function GetRemotesModule()
-    local database = ReplicatedStorage:FindFirstChild("Database")
-    local security = database and database:FindFirstChild("Security")
-    local remotes = security and security:FindFirstChild("Remotes")
-    if not (remotes and remotes:IsA("ModuleScript")) then
-        for _, desc in ipairs(ReplicatedStorage:GetDescendants()) do
-            if desc.Name == "Remotes" and desc:IsA("ModuleScript") and desc.Parent and desc.Parent.Name == "Security" then
-                remotes = desc
-                break
-            end
-        end
-    end
-    if remotes and remotes:IsA("ModuleScript") then
-        local ok, mod = pcall(require, remotes)
-        if ok and type(mod) == "table" then
-            return mod
-        end
-    end
-    return nil
-end
+-- 2. Gun & Bullet Class Hook (Pure client-side execution hook: Flick on bullet, restore on shoot end)
+local function TryHookGuns()
+    if Runtime.Hooks["gunShoot"] and Runtime.Hooks["bulletCreate"] then return end
+    if not getgc then return end
 
--- 3. Hook Bullet & Gun Classes via getgc for True Silent Aim & No Spread
-local function HookGunClasses()
     local bulletClass = nil
     local gunClass = nil
 
-    if getgc then
-        for _, entry in ipairs(getgc(true)) do
-            if type(entry) == "table" then
-                if not bulletClass and rawget(entry, "getTrueSpread") and rawget(entry, "getSpreadForConfig") then
-                    bulletClass = entry
-                end
-                if not gunClass and rawget(entry, "getSpread") and rawget(entry, "shoot") and rawget(entry, "setupRecoil") then
-                    gunClass = entry
-                end
-                if bulletClass and gunClass then break end
+    for _, entry in ipairs(getgc(true)) do
+        if type(entry) == "table" then
+            if not bulletClass and rawget(entry, "getTrueSpread") and rawget(entry, "getSpreadForConfig") then
+                bulletClass = entry
             end
+            if not gunClass and rawget(entry, "getSpread") and rawget(entry, "shoot") and rawget(entry, "setupRecoil") then
+                gunClass = entry
+            end
+            if bulletClass and gunClass then break end
         end
     end
 
     -- Hook Bullet Spread to 0
-    if bulletClass then
+    if bulletClass and not Runtime.Hooks["bulletSpread"] then
         local spreadMethods = {"getTrueSpread", "getSpreadForConfig", "getMovementSpreadForConfig", "getBaseSpreadForConfig", "getBaseSpread"}
         for _, method in ipairs(spreadMethods) do
             if type(bulletClass[method]) == "function" then
-                local origSpread
-                origSpread = SafeHook(bulletClass[method], function(...)
-                    local val = origSpread(...)
+                local oldMethod = bulletClass[method]
+                bulletClass[method] = function(...)
+                    local val = oldMethod(...)
                     if type(val) == "number" and (Config.WeaponMods.NoSpread or Runtime.ViewSaved) then
                         return 0
                     end
                     return val
-                end)
-                if origSpread then
-                    table.insert(Runtime.Hooks, function() pcall(hookfunction, bulletClass[method], origSpread) end)
-                else
-                    local oldMethod = bulletClass[method]
-                    bulletClass[method] = function(...)
-                        local val = oldMethod(...)
-                        if type(val) == "number" and (Config.WeaponMods.NoSpread or Runtime.ViewSaved) then
-                            return 0
-                        end
-                        return val
-                    end
-                    table.insert(Runtime.Hooks, function() bulletClass[method] = oldMethod end)
                 end
             end
         end
-
-        -- Instantaneous Camera Flick during Bullet Creation (Bypasses server direction check)
-        if type(bulletClass.create) == "function" then
-            local origCreate
-            origCreate = SafeHook(bulletClass.create, function(...)
-                if Config.Combat.SilentAim and Runtime.TargetPart and Camera then
-                    if math.random(1, 100) <= Config.Combat.HitChance then
-                        Runtime.ViewSaved = Runtime.ViewSaved or Camera.CFrame
-                        Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, Runtime.TargetPart.Position)
-                    end
-                end
-                return origCreate(...)
-            end)
-            if origCreate then
-                table.insert(Runtime.Hooks, function() pcall(hookfunction, bulletClass.create, origCreate) end)
-            else
-                local oldCreate = bulletClass.create
-                bulletClass.create = function(...)
-                    if Config.Combat.SilentAim and Runtime.TargetPart and Camera then
-                        if math.random(1, 100) <= Config.Combat.HitChance then
-                            Runtime.ViewSaved = Runtime.ViewSaved or Camera.CFrame
-                            Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, Runtime.TargetPart.Position)
-                        end
-                    end
-                    return oldCreate(...)
-                end
-                table.insert(Runtime.Hooks, function() bulletClass.create = oldCreate end)
-            end
-        end
+        Runtime.Hooks["bulletSpread"] = true
     end
 
-    -- Hook ShootWeapon Network Remote to instantly restore Camera synchronously
-    local net = GetRemotesModule()
-    local shootRemote = net and net.Inventory and net.Inventory.ShootWeapon
-    if shootRemote and type(shootRemote.Send) == "function" then
-        local origSend
-        origSend = SafeHook(shootRemote.Send, function(...)
+    -- Instantaneous Camera Flick during Bullet Creation
+    if bulletClass and type(bulletClass.create) == "function" and not Runtime.Hooks["bulletCreate"] then
+        local oldCreate = bulletClass.create
+        bulletClass.create = function(...)
+            if Config.Combat.SilentAim and Runtime.TargetPart and Camera then
+                if math.random(1, 100) <= Config.Combat.HitChance then
+                    Runtime.ViewSaved = Runtime.ViewSaved or Camera.CFrame
+                    Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, Runtime.TargetPart.Position)
+                end
+            end
+            return oldCreate(...)
+        end
+        Runtime.Hooks["bulletCreate"] = true
+    end
+
+    -- Instant Camera Restoration as soon as Shoot completes (Zero visual shake & zero remote pollution)
+    if gunClass and type(gunClass.shoot) == "function" and not Runtime.Hooks["gunShoot"] then
+        local oldShoot = gunClass.shoot
+        gunClass.shoot = function(...)
+            local result = oldShoot(...)
             if Runtime.ViewSaved and Camera then
                 Camera.CFrame = Runtime.ViewSaved
                 Runtime.ViewSaved = nil
             end
-            return origSend(...)
-        end)
-        if origSend then
-            table.insert(Runtime.Hooks, function() pcall(hookfunction, shootRemote.Send, origSend) end)
-        else
-            local oldSend = shootRemote.Send
-            shootRemote.Send = function(...)
-                if Runtime.ViewSaved and Camera then
-                    Camera.CFrame = Runtime.ViewSaved
-                    Runtime.ViewSaved = nil
-                end
-                return oldSend(...)
-            end
-            table.insert(Runtime.Hooks, function() shootRemote.Send = oldSend end)
+            return result
         end
+        Runtime.Hooks["gunShoot"] = true
     end
 end
-pcall(HookGunClasses)
 
--- Event-Driven Anti-Flash
+-- Active Match Detection: Only hooks when player is spawned in round
+local function EnsureMatchHooks()
+    local chars = Workspace:FindFirstChild("Characters")
+    local myChar = chars and chars:FindFirstChild(LocalPlayer.Name)
+    if not myChar then return end -- In lobby / spectator: DO NOT HOOK!
+
+    local now = os.clock()
+    if now - Runtime.LastHooksAttempt < 1.0 then return end
+    Runtime.LastHooksAttempt = now
+
+    pcall(TryHookRecoil)
+    pcall(TryHookGuns)
+end
+
+-- Event-Driven Anti-Flash (Lighting Blur suppression only, zero PlayerGui interference)
 local function SetupAntiFlash()
     local function MuteFlash(child)
         if Config.WeaponMods.AntiFlash and child:IsA("BlurEffect") and child.Name:lower():find("flash") then
@@ -563,17 +458,6 @@ local function SetupAntiFlash()
     end
     for _, obj in ipairs(Lighting:GetChildren()) do MuteFlash(obj) end
     table.insert(Runtime.Connections, Lighting.ChildAdded:Connect(MuteFlash))
-
-    local pGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-    if pGui then
-        table.insert(Runtime.Connections, pGui.DescendantAdded:Connect(function(item)
-            if Config.WeaponMods.AntiFlash and (item:IsA("Frame") or item:IsA("ImageLabel")) then
-                if item.Name:lower():find("flash") or item.Name:lower():find("blind") or item.Name:lower():find("whiteout") then
-                    item.Visible = false
-                end
-            end
-        end))
-    end
 end
 pcall(SetupAntiFlash)
 
@@ -581,11 +465,14 @@ pcall(SetupAntiFlash)
 -- MASTER RENDER LOOP (Real-Time Synchronous)
 -- ==========================================
 table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
-    -- 0. Safety View Restoration Guard (Restores camera before frame renders if shot completed)
+    -- 0. Safety View Restoration Guard (Restores camera before frame renders if needed)
     if Runtime.ViewSaved and Camera then
         Camera.CFrame = Runtime.ViewSaved
         Runtime.ViewSaved = nil
     end
+
+    -- 1. Dynamically attach combat hooks once player is deployed
+    EnsureMatchHooks()
 
     local vp = Camera.ViewportSize
     local center = Vector2.new(vp.X / 2, vp.Y / 2)
@@ -593,7 +480,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
     local visualsOn = Config.Visuals.Enabled
     local maxDist = Config.Visuals.MaxDistance
 
-    -- 1. FOV Circle
+    -- 2. FOV Circle
     if Runtime.FOVDrawing then
         Runtime.FOVDrawing.Position = center
         Runtime.FOVDrawing.Radius = Config.Combat.FOV
@@ -601,15 +488,15 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         Runtime.FOVDrawing.Visible = Config.Combat.ShowFOV
     end
 
-    -- 2. Extract Living Combatants (Cached for zero GC allocations)
+    -- 3. Extract Living Combatants (Cached for zero GC allocations)
     local combatants = UpdateCombatantsCache()
 
-    -- 3. Target Selection
+    -- 4. Target Selection
     local bestTarget, bestPart = SelectTarget(combatants)
     Runtime.Target = bestTarget
     Runtime.TargetPart = bestPart
 
-    -- 4. ESP Rendering (Pixel-Perfect Synchronous)
+    -- 5. ESP Rendering (Pixel-Perfect Synchronous)
     local activeIds = {}
 
     for _, data in ipairs(combatants) do
@@ -726,7 +613,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- 5. C4 Objective Tracker
+    -- 6. C4 Objective Tracker
     if visualsOn and Config.Visuals.C4Tracker then
         local c4 = LocateC4()
         if c4 and c4.Parent then
@@ -746,7 +633,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         Runtime.C4Drawing.Visible = false
     end
 
-    -- 6. Snappy Aim Assist (Hard-Lock on Right Click)
+    -- 7. Snappy Aim Assist (Hard-Lock on Right Click)
     if Config.Combat.AimAssist and Runtime.TargetPart then
         if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
             local currentCF = Camera.CFrame
@@ -755,10 +642,10 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- 7. Bunnyhop
+    -- 8. Bunnyhop
     if Config.Movement.Bhop and UserInputService:IsKeyDown(Enum.KeyCode.Space) then
         if not UserInputService:GetFocusedTextBox() then
-            local char = LocalPlayer.Character or (Workspace:FindFirstChild("Characters") and Workspace.Characters:FindFirstChild(LocalPlayer.Name))
+            local char = (Workspace:FindFirstChild("Characters") and Workspace.Characters:FindFirstChild(LocalPlayer.Name)) or LocalPlayer.Character
             local hum = char and char:FindFirstChildOfClass("Humanoid")
             if hum and hum.FloorMaterial ~= Enum.Material.Air then
                 hum.Jump = true
@@ -913,7 +800,7 @@ local function InitRayfield()
 
     Rayfield:Notify({
         Title = "BWX Loaded",
-        Content = "Bloxstrike Engine Ready. Tekan [K] untuk menyembunyikan/menampilkan UI.",
+        Content = "Bloxstrike Suite Siap. Tekan [K] untuk menyembunyikan/menampilkan UI.",
         Duration = 6
     })
 end
@@ -927,7 +814,9 @@ env.BWXUnload = function()
     for _, conn in ipairs(Runtime.Connections) do pcall(function() conn:Disconnect() end) end
     table.clear(Runtime.Connections)
 
-    for _, unhook in ipairs(Runtime.Hooks) do pcall(unhook) end
+    for _, unhook in pairs(Runtime.Hooks) do
+        if type(unhook) == "function" then pcall(unhook) end
+    end
     table.clear(Runtime.Hooks)
 
     if Runtime.FOVDrawing then pcall(function() Runtime.FOVDrawing:Remove() end) end
@@ -945,4 +834,4 @@ end
 env.CybrionUnload = env.BWXUnload
 env.BloxStrikeUnload = env.BWXUnload
 
-print("[BWX] Engine Initialized with Zero-Lag Pipeline & Rayfield UI.")
+print("[BWX] Engine Initialized with Dynamic Lifecycle & Zero-Lobby Impact.")

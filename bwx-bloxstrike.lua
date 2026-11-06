@@ -1,19 +1,24 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v3.6 Production Edition)
+    ⚡ BWX // Bloxstrike Utility Suite (v3.7 Laser & Stability Edition)
     Optimized for Xeno & Modern Executors
     Target: Roblox Bloxstrike (7633926880)
 
-    Architectural Updates in v3.6:
-      TASK 1: LMB Aimlock (MouseButton1) & UI Update:
-        - Aimlock trigger changed from MouseButton2 (RMB) to MouseButton1 (LMB).
-        - Aim pulls towards target exclusively when player is actively firing / holding LMB.
-        - UI label updated to "Aim Lock (Hold LMB / Fire)".
-        - Full FOV radius constraint preserved (only locks targets inside circle).
-      TASK 2: ESP Streaming/Unload Fix (Position Caching):
-        - Mitigates StreamingEnabled / occlusion culling where character models stream out behind walls.
-        - Position Caching system in Runtime.CachedPositions records live coordinates each frame.
-        - When an enemy model is occluded/unloaded, renders ESP from cached coordinates for a 1-second grace period.
-        - Eliminates instant disappearing / flickering behind walls.
+    Architectural Updates in v3.7:
+      TASK 1: No Recoil (Camera Lock):
+        - Non-invasive client-side recoil elimination via direct CameraController suppression.
+        - Suppresses weaponKick, setWeaponRecoil, and getWeaponKickRotation cleanly without heap scanning.
+        - Keeps weapon replication engine and buy-menu state machine 100% native.
+        - UI Toggle: "No Recoil (Camera Lock)".
+      TASK 2: No Spread (Laser Accuracy):
+        - Targeted Workspace.Raycast hook for bullet trajectories during LMB firing.
+        - Realigns bullet trajectory directly down Camera.CFrame.LookVector while preserving range.
+        - Strict filter: ignores character ground checks, buy zones, and script wallchecks.
+        - UI Toggle: "No Spread (Laser Accuracy)".
+      PRESERVED CORE ARCHITECTURE:
+        - LMB Aimlock (MouseButton1) with smooth 0.22 tracking and LockCenter enforcement.
+        - Position Caching ESP with 1-second grace period for occluded/streamed models behind walls.
+        - Head-only Hitbox Expander with safe memory restoration.
+        - Multi-tier team normalization (TeamId, TeamColor, Role, TeamName, and FFA check).
 ]]
 
 if not game:IsLoaded() then
@@ -25,6 +30,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local Lighting = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer
@@ -66,6 +72,8 @@ local Config = {
         C4Color = Color3.fromRGB(250, 195, 60)
     },
     WeaponMods = {
+        NoRecoil = true,
+        NoSpread = true,
         AntiFlash = true
     },
     Movement = {
@@ -88,6 +96,10 @@ local Runtime = {
     NoticeDrawing = nil,
     NoticeStart = os.clock(),
     Connections = {},
+    Hooks = {},
+    RecoilHookInstalled = false,
+    SpreadHookInstalled = false,
+    LastHookCheck = 0,
     LastC4Check = 0,
     CachedC4 = nil
 }
@@ -124,6 +136,127 @@ Runtime.NoticeDrawing.Color = Color3.fromRGB(50, 230, 150)
 Runtime.NoticeDrawing.Position = Vector2.new(Camera.ViewportSize.X / 2, 40)
 Runtime.NoticeDrawing.Text = "⚡ BWX BLOXSTRIKE READY [Tekan K / Insert untuk Menu]"
 Runtime.NoticeDrawing.Visible = true
+
+-- =========================================================================
+-- TASK 1: NO RECOIL (Zero-GC Direct Controller Hook)
+-- =========================================================================
+local function SetupNoRecoil()
+    if Runtime.RecoilHookInstalled then return end
+    local controllers = ReplicatedStorage:FindFirstChild("Controllers")
+    local camModuleScript = controllers and controllers:FindFirstChild("CameraController")
+    if camModuleScript and camModuleScript:IsA("ModuleScript") then
+        local ok, camModule = pcall(require, camModuleScript)
+        if ok and type(camModule) == "table" then
+            if type(camModule.weaponKick) == "function" and not Runtime.Hooks["weaponKick"] then
+                local oldKick = camModule.weaponKick
+                camModule.weaponKick = function(...)
+                    if Config.WeaponMods.NoRecoil then return end
+                    return oldKick(...)
+                end
+                Runtime.Hooks["weaponKick"] = function() camModule.weaponKick = oldKick end
+            end
+
+            if type(camModule.setWeaponRecoil) == "function" and not Runtime.Hooks["setWeaponRecoil"] then
+                local oldRecoil = camModule.setWeaponRecoil
+                camModule.setWeaponRecoil = function(...)
+                    if Config.WeaponMods.NoRecoil then return end
+                    return oldRecoil(...)
+                end
+                Runtime.Hooks["setWeaponRecoil"] = function() camModule.setWeaponRecoil = oldRecoil end
+            end
+
+            if type(camModule.getWeaponKickRotation) == "function" and not Runtime.Hooks["getWeaponKickRotation"] then
+                local oldRot = camModule.getWeaponKickRotation
+                camModule.getWeaponKickRotation = function(...)
+                    if Config.WeaponMods.NoRecoil then return Vector3.zero end
+                    return oldRot(...)
+                end
+                Runtime.Hooks["getWeaponKickRotation"] = function() camModule.getWeaponKickRotation = oldRot end
+            end
+
+            Runtime.RecoilHookInstalled = true
+        end
+    end
+end
+pcall(SetupNoRecoil)
+
+-- =========================================================================
+-- TASK 2: NO SPREAD (Non-Invasive Bullet Raycast Hook)
+-- =========================================================================
+local function SetupNoSpread()
+    if Runtime.SpreadHookInstalled then return end
+
+    local oldRaycast
+    local hookTarget = Workspace.Raycast
+
+    local function RaycastHook(self, origin, direction, params)
+        if Config.WeaponMods.NoSpread and typeof(origin) == "Vector3" and typeof(direction) == "Vector3" then
+            local isFiring = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+            if isFiring and not Config.UI.MenuOpen and not UserInputService:GetFocusedTextBox() then
+                -- Ignore our own script wallchecks
+                if params ~= WallParams then
+                    local cam = Camera or Workspace.CurrentCamera
+                    if cam then
+                        local distFromCam = (origin - cam.CFrame.Position).Magnitude
+                        local mag = direction.Magnitude
+                        -- Only redirect weapon bullet raycasts (origin near camera & range >= 100)
+                        if distFromCam <= 15 and mag >= 100 then
+                            direction = cam.CFrame.LookVector * mag
+                        end
+                    end
+                end
+            end
+        end
+
+        return oldRaycast(self, origin, direction, params)
+    end
+
+    local hooked = false
+    if hookfunction then
+        local ok, res = pcall(hookfunction, hookTarget, RaycastHook)
+        if ok and res then
+            oldRaycast = res
+            hooked = true
+        end
+    end
+
+    if not hooked and hookmetamethod then
+        local oldNamecall
+        oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+            local method = getnamecallmethod()
+            if (method == "Raycast" or method == "raycast") and self == Workspace then
+                local origin, direction, params = ...
+                if Config.WeaponMods.NoSpread and typeof(origin) == "Vector3" and typeof(direction) == "Vector3" then
+                    local isFiring = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+                    if isFiring and not Config.UI.MenuOpen and not UserInputService:GetFocusedTextBox() then
+                        if params ~= WallParams then
+                            local cam = Camera or Workspace.CurrentCamera
+                            if cam then
+                                local distFromCam = (origin - cam.CFrame.Position).Magnitude
+                                local mag = direction.Magnitude
+                                if distFromCam <= 15 and mag >= 100 then
+                                    direction = cam.CFrame.LookVector * mag
+                                    return oldNamecall(self, origin, direction, params)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            return oldNamecall(self, ...)
+        end)
+        Runtime.Hooks["namecall_raycast"] = function() hookmetamethod(game, "__namecall", oldNamecall) end
+        hooked = true
+    end
+
+    if hooked then
+        Runtime.SpreadHookInstalled = true
+        if oldRaycast then
+            Runtime.Hooks["raycast"] = function() hookfunction(hookTarget, oldRaycast) end
+        end
+    end
+end
+pcall(SetupNoSpread)
 
 -- Team Normalization (Resolves TeamId 1/2, TeamColor, Role, TeamName)
 local function NormalizeTeam(val)
@@ -399,6 +532,13 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
 
     local now = os.clock()
 
+    -- Lazy attach hooks if game loaded modules late
+    if now - Runtime.LastHookCheck > 2.0 then
+        Runtime.LastHookCheck = now
+        if not Runtime.RecoilHookInstalled then pcall(SetupNoRecoil) end
+        if not Runtime.SpreadHookInstalled then pcall(SetupNoSpread) end
+    end
+
     -- 1. Startup banner fadeout
     if Runtime.NoticeDrawing and Runtime.NoticeDrawing.Visible then
         local elapsed = now - Runtime.NoticeStart
@@ -454,7 +594,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
                         local maxHp = tonumber(model:GetAttribute("MaxHealth")) or 100
                         local displayName = (player and player.DisplayName) or model.Name
 
-                        -- TASK 2: Update Cached Position every frame the model is visible
+                        -- Position Caching for StreamingEnabled / Occlusion Behind Walls
                         Runtime.CachedPositions[id] = {
                             Position = rootPos,
                             LastSeen = now,
@@ -577,7 +717,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- TASK 2: Position Caching ESP for StreamingEnabled / Occluded Models Behind Walls
+    -- Position Caching ESP for StreamingEnabled / Occluded Models Behind Walls
     if visualsOn then
         for id, cached in pairs(Runtime.CachedPositions) do
             if not activeIds[id] then
@@ -757,7 +897,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         Runtime.C4Drawing.Visible = false
     end
 
-    -- 6. Native Input Aim Lock (TASK 1: Hold LMB / Fire via mousemoverel)
+    -- 6. Native Input Aim Lock (Hold LMB / Fire via mousemoverel)
     if Config.Combat.AimLock and Runtime.TargetPart and not Config.UI.MenuOpen and not UserInputService:GetFocusedTextBox() then
         local isAiming = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
         if isAiming then
@@ -1045,6 +1185,7 @@ local function BuildUI()
         end)
     end
 
+    -- CreateSlider with Correct valLabel Parenting
     local function CreateSlider(parent, titleText, min, max, initialVal, suffix, callback)
         local frame = Instance.new("Frame")
         frame.Size = UDim2.new(1, 0, 0, 48)
@@ -1178,7 +1319,7 @@ local function BuildUI()
         end)
     end
 
-    -- Build Combat Tab (TASK 1: Updated to "Aim Lock (Hold LMB / Fire)")
+    -- Build Combat Tab
     local combatPage = pages["Combat"]
     CreateToggle(combatPage, "Aim Lock (Hold LMB / Fire)", Config.Combat.AimLock, function(v) Config.Combat.AimLock = v end)
     CreateSlider(combatPage, "Aim Lock Smoothness", 5, 100, math.floor(Config.Combat.AimLockStrength * 100), "%", function(v) Config.Combat.AimLockStrength = v / 100 end)
@@ -1206,9 +1347,17 @@ local function BuildUI()
     CreateToggle(visualsPage, "C4 Bomb Tracker", Config.Visuals.C4Tracker, function(v) Config.Visuals.C4Tracker = v end)
     CreateSlider(visualsPage, "Max ESP Distance", 500, 8000, Config.Visuals.MaxDistance, "m", function(v) Config.Visuals.MaxDistance = v end)
 
-    -- Build Gun Mods Tab
+    -- Build Gun Mods Tab (TASK 1 & TASK 2: No Recoil & No Spread Toggles)
     local modsPage = pages["Gun Mods"]
-    CreateToggle(modsPage, "Anti-Flashbang (Instant Blind Wipe)", Config.WeaponMods.AntiFlash, function(v) Config.WeaponMods.AntiFlash = v end)
+    CreateToggle(modsPage, "No Recoil (Camera Lock)", Config.WeaponMods.NoRecoil, function(v) 
+        Config.WeaponMods.NoRecoil = v 
+    end)
+    CreateToggle(modsPage, "No Spread (Laser Accuracy)", Config.WeaponMods.NoSpread, function(v) 
+        Config.WeaponMods.NoSpread = v 
+    end)
+    CreateToggle(modsPage, "Anti-Flashbang (Instant Blind Wipe)", Config.WeaponMods.AntiFlash, function(v) 
+        Config.WeaponMods.AntiFlash = v 
+    end)
 
     -- Build Movement Tab
     local movePage = pages["Movement"]
@@ -1245,6 +1394,11 @@ env.BWXUnload = function()
     for _, conn in ipairs(Runtime.Connections) do pcall(function() conn:Disconnect() end) end
     table.clear(Runtime.Connections)
 
+    for _, unhook in pairs(Runtime.Hooks) do
+        if type(unhook) == "function" then pcall(unhook) end
+    end
+    table.clear(Runtime.Hooks)
+
     if Runtime.FOVDrawing then pcall(function() Runtime.FOVDrawing:Remove() end) end
     if Runtime.C4Drawing then pcall(function() Runtime.C4Drawing:Remove() end) end
     if Runtime.NoticeDrawing then pcall(function() Runtime.NoticeDrawing:Remove() end) end
@@ -1263,4 +1417,4 @@ end
 env.CybrionUnload = env.BWXUnload
 env.BloxStrikeUnload = env.BWXUnload
 
-print("[BWX] Suite v3.6 Loaded. LMB Aimlock & Position-Cached ESP Pipeline.")
+print("[BWX] Suite v3.7 Loaded. Zero-GC No Recoil & No Spread Engine.")

@@ -1,19 +1,26 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v3.7.2 Stability & DeadCheck Patch)
+    ⚡ BWX // Bloxstrike Utility Suite (v3.8 Non-Invasive Recoil & Spread Edition)
     Optimized for Xeno & Modern Executors
     Target: Roblox Bloxstrike (7633926880)
 
-    Architectural Updates in v3.7.2:
-      BUG FIX: Robust Dual-Target Dead Check (IsModelDead):
-        - Guarded model against nil references when evaluating occluded/streamed entities from position cache.
-        - Full player fallback checking Player.Attributes (Dead, IsDead, Health).
-        - Safe Humanoid health verification without crashing RenderStepped loop.
+    Architectural Updates in v3.8:
+      TASK 1: Full Removal of Invasive Hooks:
+        - Deleted SetupNoRecoil and SetupNoSpread functions completely.
+        - Eliminated all hookfunction and hookmetamethod calls to CameraController & Workspace.Raycast.
+        - Preserved 100% native engine replication, weapon purchases, and round state machines.
+      TASK 2: Non-Invasive No Recoil (Physical Mouse Compensation):
+        - Frame-by-frame camera pitch and yaw delta tracking inside RenderStepped.
+        - When firing (holding LMB), automatically counters camera kick via mousemoverel.
+        - Seamlessly merges with AimLock (recoil compensation only acts when AimLock is not tracking).
+      TASK 3: Non-Invasive No Spread (Property / Attribute Overwrite):
+        - Scans equipped Tool and ReplicatedStorage definitions for Spread/BaseSpread/MinSpread.
+        - Overwrites spread attributes to 0 without intercepting raycasts or firing remotes.
       PRESERVED CORE ARCHITECTURE:
-        - Zero-GC No Recoil (CameraController suppression) & No Spread (Workspace.Raycast redirection).
         - LMB Aimlock (MouseButton1) with smooth 0.22 tracking and LockCenter enforcement.
         - Position Caching ESP with 1-second grace period for occluded/streamed models behind walls.
         - Head-only Hitbox Expander with safe memory restoration.
         - Multi-tier team normalization (TeamId, TeamColor, Role, TeamName, and FFA check).
+        - Robust dual-target dead check (IsModelDead) with full player fallback.
 ]]
 
 if not game:IsLoaded() then
@@ -86,15 +93,13 @@ local Runtime = {
     DrawingPool = {},
     OriginalSizes = {}, -- For safe Hitbox Expander restoration
     CachedPositions = {}, -- Task 2: Position Caching for StreamingEnabled / Occlusion
+    LastPitch = nil,
+    LastYaw = nil,
     FOVDrawing = nil,
     C4Drawing = nil,
     NoticeDrawing = nil,
     NoticeStart = os.clock(),
     Connections = {},
-    Hooks = {},
-    RecoilHookInstalled = false,
-    SpreadHookInstalled = false,
-    LastHookCheck = 0,
     LastC4Check = 0,
     CachedC4 = nil
 }
@@ -133,125 +138,54 @@ Runtime.NoticeDrawing.Text = "⚡ BWX BLOXSTRIKE READY [Tekan K / Insert untuk M
 Runtime.NoticeDrawing.Visible = true
 
 -- =========================================================================
--- TASK 1: NO RECOIL (Zero-GC Direct Controller Hook)
+-- NON-INVASIVE WEAPON MODS (Property & Attribute Overwrite)
 -- =========================================================================
-local function SetupNoRecoil()
-    if Runtime.RecoilHookInstalled then return end
-    local controllers = ReplicatedStorage:FindFirstChild("Controllers")
-    local camModuleScript = controllers and controllers:FindFirstChild("CameraController")
-    if camModuleScript and camModuleScript:IsA("ModuleScript") then
-        local ok, camModule = pcall(require, camModuleScript)
-        if ok and type(camModule) == "table" then
-            if type(camModule.weaponKick) == "function" and not Runtime.Hooks["weaponKick"] then
-                local oldKick = camModule.weaponKick
-                camModule.weaponKick = function(...)
-                    if Config.WeaponMods.NoRecoil then return end
-                    return oldKick(...)
+local function ApplyNoSpread()
+    if not Config.WeaponMods.NoSpread then return end
+
+    local myChar = (Workspace:FindFirstChild("Characters") and Workspace.Characters:FindFirstChild(LocalPlayer.Name)) or LocalPlayer.Character
+    if myChar then
+        local tool = myChar:FindFirstChildOfClass("Tool")
+        if tool then
+            -- 1. Overwrite Tool Attributes
+            for _, attr in ipairs({"Spread", "BaseSpread", "MinSpread", "MaxSpread", "CurrentSpread", "Inaccuracy", "WeaponSpread"}) do
+                if tool:GetAttribute(attr) ~= nil and tool:GetAttribute(attr) ~= 0 then
+                    pcall(function() tool:SetAttribute(attr, 0) end)
                 end
-                Runtime.Hooks["weaponKick"] = function() camModule.weaponKick = oldKick end
             end
 
-            if type(camModule.setWeaponRecoil) == "function" and not Runtime.Hooks["setWeaponRecoil"] then
-                local oldRecoil = camModule.setWeaponRecoil
-                camModule.setWeaponRecoil = function(...)
-                    if Config.WeaponMods.NoRecoil then return end
-                    return oldRecoil(...)
+            -- 2. Overwrite Tool Child Values
+            for _, name in ipairs({"Spread", "BaseSpread", "MinSpread", "MaxSpread", "Inaccuracy"}) do
+                local val = tool:FindFirstChild(name, true)
+                if val and (val:IsA("NumberValue") or val:IsA("IntValue")) and val.Value ~= 0 then
+                    pcall(function() val.Value = 0 end)
                 end
-                Runtime.Hooks["setWeaponRecoil"] = function() camModule.setWeaponRecoil = oldRecoil end
             end
+        end
 
-            if type(camModule.getWeaponKickRotation) == "function" and not Runtime.Hooks["getWeaponKickRotation"] then
-                local oldRot = camModule.getWeaponKickRotation
-                camModule.getWeaponKickRotation = function(...)
-                    if Config.WeaponMods.NoRecoil then return CFrame.Angles(0, 0, 0) end
-                    return oldRot(...)
+        -- 3. Overwrite Character / Player Spread Attributes
+        for _, attr in ipairs({"Spread", "BaseSpread", "MinSpread", "MaxSpread", "Inaccuracy"}) do
+            if myChar:GetAttribute(attr) ~= nil and myChar:GetAttribute(attr) ~= 0 then
+                pcall(function() myChar:SetAttribute(attr, 0) end)
+            end
+            if LocalPlayer:GetAttribute(attr) ~= nil and LocalPlayer:GetAttribute(attr) ~= 0 then
+                pcall(function() LocalPlayer:SetAttribute(attr, 0) end)
+            end
+        end
+    end
+
+    -- 4. Overwrite ReplicatedStorage Weapon definitions if present
+    local weaponsFolder = ReplicatedStorage:FindFirstChild("Weapons") or ReplicatedStorage:FindFirstChild("WeaponConfigs") or ReplicatedStorage:FindFirstChild("Items")
+    if weaponsFolder then
+        for _, item in ipairs(weaponsFolder:GetChildren()) do
+            for _, attr in ipairs({"Spread", "BaseSpread", "MinSpread", "MaxSpread"}) do
+                if item:GetAttribute(attr) ~= nil and item:GetAttribute(attr) ~= 0 then
+                    pcall(function() item:SetAttribute(attr, 0) end)
                 end
-                Runtime.Hooks["getWeaponKickRotation"] = function() camModule.getWeaponKickRotation = oldRot end
             end
-
-            Runtime.RecoilHookInstalled = true
         end
     end
 end
-pcall(SetupNoRecoil)
-
--- =========================================================================
--- TASK 2: NO SPREAD (Non-Invasive Bullet Raycast Hook)
--- =========================================================================
-local function SetupNoSpread()
-    if Runtime.SpreadHookInstalled then return end
-
-    local oldRaycast
-    local hookTarget = Workspace.Raycast
-
-    local function RaycastHook(self, origin, direction, params)
-        if Config.WeaponMods.NoSpread and typeof(origin) == "Vector3" and typeof(direction) == "Vector3" then
-            local isFiring = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
-            if isFiring and not Config.UI.MenuOpen and not UserInputService:GetFocusedTextBox() then
-                -- Ignore our own script wallchecks
-                if params ~= WallParams then
-                    local cam = Camera or Workspace.CurrentCamera
-                    if cam then
-                        local distFromCam = (origin - cam.CFrame.Position).Magnitude
-                        local mag = direction.Magnitude
-                        -- Only redirect weapon bullet raycasts (origin near camera & range >= 100)
-                        if distFromCam <= 15 and mag >= 100 then
-                            direction = cam.CFrame.LookVector * mag
-                        end
-                    end
-                end
-            end
-        end
-
-        return oldRaycast(self, origin, direction, params)
-    end
-
-    local hooked = false
-    if hookfunction then
-        local ok, res = pcall(hookfunction, hookTarget, RaycastHook)
-        if ok and res then
-            oldRaycast = res
-            hooked = true
-        end
-    end
-
-    if not hooked and hookmetamethod then
-        local oldNamecall
-        oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-            local method = getnamecallmethod()
-            if (method == "Raycast" or method == "raycast") and self == Workspace then
-                local origin, direction, params = ...
-                if Config.WeaponMods.NoSpread and typeof(origin) == "Vector3" and typeof(direction) == "Vector3" then
-                    local isFiring = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
-                    if isFiring and not Config.UI.MenuOpen and not UserInputService:GetFocusedTextBox() then
-                        if params ~= WallParams then
-                            local cam = Camera or Workspace.CurrentCamera
-                            if cam then
-                                local distFromCam = (origin - cam.CFrame.Position).Magnitude
-                                local mag = direction.Magnitude
-                                if distFromCam <= 15 and mag >= 100 then
-                                    direction = cam.CFrame.LookVector * mag
-                                    return oldNamecall(self, origin, direction, params)
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-            return oldNamecall(self, ...)
-        end)
-        Runtime.Hooks["namecall_raycast"] = function() hookmetamethod(game, "__namecall", oldNamecall) end
-        hooked = true
-    end
-
-    if hooked then
-        Runtime.SpreadHookInstalled = true
-        if oldRaycast then
-            Runtime.Hooks["raycast"] = function() hookfunction(hookTarget, oldRaycast) end
-        end
-    end
-end
-pcall(SetupNoSpread)
 
 -- Team Normalization (Resolves TeamId 1/2, TeamColor, Role, TeamName)
 local function NormalizeTeam(val)
@@ -541,17 +475,11 @@ end
 -- MASTER RENDER LOOP (High-Performance Single-Pass Execution)
 -- =========================================================================
 table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
-    -- 0. MainMenu Guard
+    -- 0. MainMenu Guard & Spread Attribute Enforcement
     GuardMatchUI()
+    ApplyNoSpread()
 
     local now = os.clock()
-
-    -- Lazy attach hooks if game loaded modules late
-    if now - Runtime.LastHookCheck > 2.0 then
-        Runtime.LastHookCheck = now
-        if not Runtime.RecoilHookInstalled then pcall(SetupNoRecoil) end
-        if not Runtime.SpreadHookInstalled then pcall(SetupNoSpread) end
-    end
 
     -- 1. Startup banner fadeout
     if Runtime.NoticeDrawing and Runtime.NoticeDrawing.Visible then
@@ -911,10 +839,13 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         Runtime.C4Drawing.Visible = false
     end
 
-    -- 6. Native Input Aim Lock (Hold LMB / Fire via mousemoverel)
+    -- 6. Native Input Aim Lock & Non-Invasive No Recoil (Mouse Compensation)
+    local isFiring = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+    local isAimlocking = false
+
     if Config.Combat.AimLock and Runtime.TargetPart and not Config.UI.MenuOpen and not UserInputService:GetFocusedTextBox() then
-        local isAiming = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
-        if isAiming then
+        if isFiring then
+            isAimlocking = true
             -- Force LockCenter so mousemoverel rotates the first-person camera smoothly
             if UserInputService.MouseBehavior ~= Enum.MouseBehavior.LockCenter then
                 pcall(function()
@@ -937,6 +868,41 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
             end
         end
     end
+
+    -- TASK 2: Non-Invasive No Recoil (Physical Mouse Compensation)
+    -- Operates when firing and not actively Aimlocking onto an entity
+    local curPitch, curYaw = Camera.CFrame:ToOrientation()
+    if Config.WeaponMods.NoRecoil and isFiring and not isAimlocking and not Config.UI.MenuOpen and not UserInputService:GetFocusedTextBox() then
+        if Runtime.LastPitch and Runtime.LastYaw then
+            local dPitch = curPitch - Runtime.LastPitch
+            local dYaw = curYaw - Runtime.LastYaw
+            local userMouse = UserInputService:GetMouseDelta()
+
+            -- Convert angular rotation delta to viewport pixel delta
+            local radToPixY = Camera.ViewportSize.Y / math.rad(Camera.FieldOfView)
+            local radToPixX = Camera.ViewportSize.X / math.rad(Camera.FieldOfView)
+
+            local kickY = dPitch * radToPixY
+            local kickX = -dYaw * radToPixX
+
+            -- Subtract user intentional hand movement
+            local compY = kickY - userMouse.Y
+            local compX = kickX - userMouse.X
+
+            -- Clamp compensation to avoid erratic snapping
+            compY = math.clamp(compY, -25, 25)
+            compX = math.clamp(compX, -25, 25)
+
+            if (math.abs(compY) > 0.3 or math.abs(compX) > 0.3) and mousemoverel then
+                if UserInputService.MouseBehavior ~= Enum.MouseBehavior.LockCenter then
+                    pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter end)
+                end
+                mousemoverel(compX * 0.85, compY * 0.85)
+            end
+        end
+    end
+    Runtime.LastPitch = curPitch
+    Runtime.LastYaw = curYaw
 
     -- 7. Bunnyhop
     if Config.Movement.Bhop and UserInputService:IsKeyDown(Enum.KeyCode.Space) then
@@ -1361,12 +1327,12 @@ local function BuildUI()
     CreateToggle(visualsPage, "C4 Bomb Tracker", Config.Visuals.C4Tracker, function(v) Config.Visuals.C4Tracker = v end)
     CreateSlider(visualsPage, "Max ESP Distance", 500, 8000, Config.Visuals.MaxDistance, "m", function(v) Config.Visuals.MaxDistance = v end)
 
-    -- Build Gun Mods Tab (TASK 1 & TASK 2: No Recoil & No Spread Toggles)
+    -- Build Gun Mods Tab (Non-Invasive Recoil & Spread Toggles)
     local modsPage = pages["Gun Mods"]
-    CreateToggle(modsPage, "No Recoil (Camera Lock)", Config.WeaponMods.NoRecoil, function(v) 
+    CreateToggle(modsPage, "No Recoil (Mouse Compensation)", Config.WeaponMods.NoRecoil, function(v) 
         Config.WeaponMods.NoRecoil = v 
     end)
-    CreateToggle(modsPage, "No Spread (Laser Accuracy)", Config.WeaponMods.NoSpread, function(v) 
+    CreateToggle(modsPage, "No Spread (Attribute Overwrite)", Config.WeaponMods.NoSpread, function(v) 
         Config.WeaponMods.NoSpread = v 
     end)
     CreateToggle(modsPage, "Anti-Flashbang (Instant Blind Wipe)", Config.WeaponMods.AntiFlash, function(v) 
@@ -1408,11 +1374,6 @@ env.BWXUnload = function()
     for _, conn in ipairs(Runtime.Connections) do pcall(function() conn:Disconnect() end) end
     table.clear(Runtime.Connections)
 
-    for _, unhook in pairs(Runtime.Hooks) do
-        if type(unhook) == "function" then pcall(unhook) end
-    end
-    table.clear(Runtime.Hooks)
-
     if Runtime.FOVDrawing then pcall(function() Runtime.FOVDrawing:Remove() end) end
     if Runtime.C4Drawing then pcall(function() Runtime.C4Drawing:Remove() end) end
     if Runtime.NoticeDrawing then pcall(function() Runtime.NoticeDrawing:Remove() end) end
@@ -1431,4 +1392,4 @@ end
 env.CybrionUnload = env.BWXUnload
 env.BloxStrikeUnload = env.BWXUnload
 
-print("[BWX] Suite v3.7.2 Loaded. Zero-GC No Recoil & No Spread Engine.")
+print("[BWX] Suite v3.8 Loaded. Non-Invasive Recoil & Spread Pipeline.")

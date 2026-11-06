@@ -1,20 +1,15 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v3.7 Laser & Stability Edition)
+    ⚡ BWX // Bloxstrike Utility Suite (v3.7.1 Laser & Stability Patch)
     Optimized for Xeno & Modern Executors
     Target: Roblox Bloxstrike (7633926880)
 
-    Architectural Updates in v3.7:
-      TASK 1: No Recoil (Camera Lock):
-        - Non-invasive client-side recoil elimination via direct CameraController suppression.
-        - Suppresses weaponKick, setWeaponRecoil, and getWeaponKickRotation cleanly without heap scanning.
-        - Keeps weapon replication engine and buy-menu state machine 100% native.
-        - UI Toggle: "No Recoil (Camera Lock)".
-      TASK 2: No Spread (Laser Accuracy):
-        - Targeted Workspace.Raycast hook for bullet trajectories during LMB firing.
-        - Realigns bullet trajectory directly down Camera.CFrame.LookVector while preserving range.
-        - Strict filter: ignores character ground checks, buy zones, and script wallchecks.
-        - UI Toggle: "No Spread (Laser Accuracy)".
+    Architectural Updates in v3.7.1:
+      BUG 1: WallParams.FilterType Enum Validation:
+        - Ensured Enum.RaycastFilterType.Exclude is used for native engine compliance.
+      BUG 2: CameraController getWeaponKickRotation Type Alignment:
+        - Returned CFrame.Angles(0, 0, 0) instead of Vector3.zero to match camera matrix expectations.
       PRESERVED CORE ARCHITECTURE:
+        - Zero-GC No Recoil (CameraController suppression) & No Spread (Workspace.Raycast redirection).
         - LMB Aimlock (MouseButton1) with smooth 0.22 tracking and LockCenter enforcement.
         - Position Caching ESP with 1-second grace period for occluded/streamed models behind walls.
         - Head-only Hitbox Expander with safe memory restoration.
@@ -168,7 +163,7 @@ local function SetupNoRecoil()
             if type(camModule.getWeaponKickRotation) == "function" and not Runtime.Hooks["getWeaponKickRotation"] then
                 local oldRot = camModule.getWeaponKickRotation
                 camModule.getWeaponKickRotation = function(...)
-                    if Config.WeaponMods.NoRecoil then return Vector3.zero end
+                    if Config.WeaponMods.NoRecoil then return CFrame.Angles(0, 0, 0) end
                     return oldRot(...)
                 end
                 Runtime.Hooks["getWeaponKickRotation"] = function() camModule.getWeaponKickRotation = oldRot end
@@ -1417,4 +1412,4 @@ end
 env.CybrionUnload = env.BWXUnload
 env.BloxStrikeUnload = env.BWXUnload
 
-print("[BWX] Suite v3.7 Loaded. Zero-GC No Recoil & No Spread Engine.")
+print("[BWX] Suite v3.7.1 Loaded. Zero-GC No Recoil & No Spread Engine.")

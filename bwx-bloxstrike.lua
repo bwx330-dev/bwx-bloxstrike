@@ -1,28 +1,25 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v3.3 High-Performance Architecture)
+    ⚡ BWX // Bloxstrike Utility Suite (v3.4 Production Edition)
     Optimized for Xeno & Modern Executors
     Target: Roblox Bloxstrike (7633926880)
 
-    Architectural Optimizations in v3.3:
-      1. Zero GC Scanning (Eliminated getgc):
-         - Completely removed getgc(true) heap traversals.
-         - Eliminates CPU frame-time spikes (stutters) that caused artificial high-ping feel.
-      2. Zero Module Hook Interference (100% Native Weapon Replication):
-         - Removed invasive hooks on CameraController (weaponKick, getWeaponKickRotation)
-           and bulletClass to prevent client-server replication state machine stalls.
-         - Fixes weapon purchase delay (guns are received immediately in the current round,
-           not deferred to the next round).
-         - Recoil compensation handled purely via hardware input (mousemoverel), ensuring
-           the game's internal replication engine remains completely uncorrupted.
-      3. High-Frequency Rendering & Spatial Optimization:
-         - Consolidated entity extraction, 2D viewport projections, and ESP rendering into
-           a single fast pass per frame, eliminating duplicate WorldToViewportPoint math.
-         - Raycasts throttled to at most 1 raycast per frame for only the closest FOV candidate,
-           preventing pipeline saturation and visual lagging/blinking.
-         - Replaced Workspace:GetChildren() traversals with direct O(1) hash lookups for C4.
-      4. Closed-by-Default UI:
-         - Starts closed (ScreenGui.Enabled = false) to ensure zero mouse click or crosshair absorption.
-         - Toggle Keybind: [K] or [Insert]
+    Fixes in v3.4:
+      1. Wallcheck Raycast Crash Fix:
+         - Uses a dynamic filterList = {Camera}. Inserts myChar only if non-nil.
+         - Eliminates nil-entry crash in WallParams.FilterDescendantsInstances during death/spawn.
+      2. UI Slider Value Text Parenting Fix:
+         - Changed second label.Parent = frame to valLabel.Parent = frame in CreateSlider.
+         - Slider values now properly display dynamically.
+      3. Team Check Fallback & Guard Clause Fix:
+         - Added model:GetAttribute("Team") / model:GetAttribute("TeamName") fallbacks in GetEntityTeam.
+         - Added guard clause in IsTeammate: returns false immediately if myChar is nil (no false-positive enemy flags on death).
+      4. C4 Locator Recursive Search:
+         - Added recursive boolean true in FindFirstChild("C4", true) to find C4 nested in subfolders (e.g. Map.Objectives).
+      5. True Silent Aim (Hitbox Expander) & Native Aim Lock:
+         - Split into Aim Lock (pulls cursor with mousemoverel) and true Silent Aim (Hitbox Expander for magnetic bullet registration).
+         - Automatic size & collision restoration when disabled, unloaded, or when player dies.
+      6. Loop Optimization via GetPlayerFromCharacter:
+         - Replaced slow string matching Players:FindFirstChild(id) with native C++ Players:GetPlayerFromCharacter(model).
 ]]
 
 if not game:IsLoaded() then
@@ -48,9 +45,11 @@ if env.BloxStrikeUnload then pcall(env.BloxStrikeUnload) end
 -- Configuration Table
 local Config = {
     Combat = {
-        SilentAim = true,
-        AimAssist = true,
+        AimLock = true,
         AimLockStrength = 0.95,
+        SilentAim = true, -- True Silent Aim via Hitbox Expander (Peluru Nyangkut)
+        HitboxSize = 8,
+        HitboxPart = "Head",
         HitPart = "Head",
         FOV = 130,
         VisibleCheck = false,
@@ -89,6 +88,7 @@ local Runtime = {
     Target = nil,
     TargetPart = nil,
     DrawingPool = {},
+    OriginalSizes = {}, -- For safe Hitbox Expander restoration
     FOVDrawing = nil,
     C4Drawing = nil,
     NoticeDrawing = nil,
@@ -131,13 +131,17 @@ Runtime.NoticeDrawing.Position = Vector2.new(Camera.ViewportSize.X / 2, 40)
 Runtime.NoticeDrawing.Text = "⚡ BWX BLOXSTRIKE READY [Tekan K / Insert untuk Menu]"
 Runtime.NoticeDrawing.Visible = true
 
--- Team Resolution (Accurate for Bloxstrike CT vs T)
+-- Team Resolution with full model & player fallbacks (Fix 3)
 local function GetEntityTeam(model, player)
+    if model then
+        local mTeam = model:GetAttribute("Team") or model:GetAttribute("TeamName")
+        if mTeam then return tostring(mTeam) end
+    end
     if player and player.Team then
         return player.Team.Name
     end
     if player then
-        local attr = player:GetAttribute("Team")
+        local attr = player:GetAttribute("Team") or player:GetAttribute("TeamName")
         if attr then return tostring(attr) end
     end
     if model then
@@ -150,11 +154,14 @@ local function GetEntityTeam(model, player)
     return nil
 end
 
+-- Team check with dead / unspawned guard clause (Fix 3)
 local function IsTeammate(model, player)
     if not Config.Visuals.TeamCheck then return false end
     if player == LocalPlayer or (model and model.Name == LocalPlayer.Name) then return true end
 
     local myChar = (Workspace:FindFirstChild("Characters") and Workspace.Characters:FindFirstChild(LocalPlayer.Name)) or LocalPlayer.Character
+    if not myChar then return false end -- Guard clause: prevents false enemy flags on death
+
     local myTeam = GetEntityTeam(myChar, LocalPlayer)
     local targetTeam = GetEntityTeam(model, player)
     if myTeam and targetTeam then
@@ -235,12 +242,12 @@ local function DestroyDrawing(draw)
     end
 end
 
--- Fast O(1) C4 Locator (No Workspace:GetChildren() scan)
+-- Fast Recursive C4 Locator with descendant search (Fix 4)
 local function LocateC4()
     local now = os.clock()
     if now - Runtime.LastC4Check > 1.0 then
         Runtime.LastC4Check = now
-        local c4 = Workspace:FindFirstChild("C4") or Workspace:FindFirstChild("Bomb") or Workspace:FindFirstChild("PlantedC4")
+        local c4 = Workspace:FindFirstChild("C4", true) or Workspace:FindFirstChild("Bomb", true) or Workspace:FindFirstChild("PlantedC4", true)
         if c4 then
             if c4:IsA("BasePart") then
                 Runtime.CachedC4 = c4
@@ -267,6 +274,38 @@ local function IsModelDead(model, player)
         if hp and hp <= 0 then return true end
     end
     return false
+end
+
+-- Hitbox Expander Logic (Fix 5: True Silent Aim)
+local function ApplyHitbox(model, partName)
+    local part = model:FindFirstChild(partName) or model:FindFirstChild("Head") or model:FindFirstChild("HumanoidRootPart")
+    if part and part:IsA("BasePart") then
+        if not Runtime.OriginalSizes[part] then
+            Runtime.OriginalSizes[part] = {
+                Part = part,
+                Size = part.Size,
+                Transparency = part.Transparency,
+                CanCollide = part.CanCollide
+            }
+        end
+        local s = Config.Combat.HitboxSize
+        part.Size = Vector3.new(s, s, s)
+        part.Transparency = 0.65
+        part.CanCollide = false
+    end
+end
+
+local function ResetAllHitboxes()
+    for part, data in pairs(Runtime.OriginalSizes) do
+        if part and part.Parent then
+            pcall(function()
+                part.Size = data.Size
+                part.Transparency = data.Transparency
+                part.CanCollide = data.CanCollide
+            end)
+        end
+    end
+    table.clear(Runtime.OriginalSizes)
 end
 
 -- Event-Driven Anti-Flash (Lighting Blur suppression only)
@@ -334,7 +373,12 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         Runtime.FOVDrawing.Visible = Config.Combat.ShowFOV
     end
 
-    -- 3. Consolidated Single-Pass Entity & ESP Pipeline
+    -- Hitbox reset if feature is switched off
+    if not Config.Combat.SilentAim and next(Runtime.OriginalSizes) then
+        ResetAllHitboxes()
+    end
+
+    -- 3. Consolidated Single-Pass Entity & ESP Pipeline (Fix 6: GetPlayerFromCharacter)
     local activeIds = {}
     local bestCandidate = nil
     local bestScreenDist = fov
@@ -344,8 +388,9 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
     if chars then
         for _, model in ipairs(chars:GetChildren()) do
             if model:IsA("Model") and model.Name ~= LocalPlayer.Name then
-                local id = model.Name
-                local player = Players:FindFirstChild(id)
+                -- Native C++ character to player lookup (Fix 6)
+                local player = Players:GetPlayerFromCharacter(model)
+                local id = player and player.Name or model.Name
 
                 if not IsModelDead(model, player) then
                     local root = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Torso")
@@ -356,6 +401,11 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
                         local isTeam = IsTeammate(model, player)
                         local rootPos = root.Position
                         local dist = (rootPos - camPos).Magnitude
+
+                        -- Apply Hitbox Expander for Enemies (Fix 5)
+                        if Config.Combat.SilentAim and not isTeam then
+                            ApplyHitbox(model, Config.Combat.HitboxPart)
+                        end
 
                         local draw = GetOrCreateDrawing(id)
 
@@ -467,7 +517,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- Cleanup Unused Drawings
+    -- Cleanup Unused Drawings & Dead Hitboxes
     for id, draw in pairs(Runtime.DrawingPool) do
         if not activeIds[id] then
             DestroyDrawing(draw)
@@ -475,10 +525,26 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- 4. Throttled Single-Raycast Wallcheck (Only for the single best candidate)
+    for part, data in pairs(Runtime.OriginalSizes) do
+        if not part.Parent or not part.Parent.Parent or not activeIds[part.Parent.Name] then
+            pcall(function()
+                part.Size = data.Size
+                part.Transparency = data.Transparency
+                part.CanCollide = data.CanCollide
+            end)
+            Runtime.OriginalSizes[part] = nil
+        end
+    end
+
+    -- 4. Throttled Single-Raycast Wallcheck with Dynamic Filter Table (Fix 1)
     if bestHitPart and Config.Combat.VisibleCheck then
         local myChar = chars and chars:FindFirstChild(LocalPlayer.Name)
-        WallParams.FilterDescendantsInstances = {Camera, myChar}
+        local filterList = {Camera}
+        if myChar then
+            table.insert(filterList, myChar)
+        end
+        WallParams.FilterDescendantsInstances = filterList
+
         local dir = bestHitPart.Position - camPos
         local hit = Workspace:Raycast(camPos, dir, WallParams)
         if hit and not hit.Instance:IsDescendantOf(bestCandidate) then
@@ -490,7 +556,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
     Runtime.Target = bestCandidate
     Runtime.TargetPart = bestHitPart
 
-    -- 5. Fast C4 Objective Tracker (O(1) Hash Lookup)
+    -- 5. Fast Recursive C4 Objective Tracker (Fix 4)
     if visualsOn and Config.Visuals.C4Tracker then
         local c4 = LocateC4()
         if c4 and c4.Parent then
@@ -510,8 +576,8 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         Runtime.C4Drawing.Visible = false
     end
 
-    -- 6. Native Input Aim Assist (Hard-Lock & Recoil Counter via mousemoverel)
-    if (Config.Combat.AimAssist or Config.Combat.SilentAim) and Runtime.TargetPart then
+    -- 6. Native Input Aim Lock (Fix 5: Hold Right Click via mousemoverel)
+    if Config.Combat.AimLock and Runtime.TargetPart then
         local isAiming = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
         if isAiming then
             local targetPos = Runtime.TargetPart.Position
@@ -567,7 +633,7 @@ local function BuildUI()
 
     local main = Instance.new("Frame")
     main.Name = "Main"
-    main.Size = UDim2.fromOffset(540, 360)
+    main.Size = UDim2.fromOffset(540, 370)
     main.Position = UDim2.fromScale(0.3, 0.25)
     main.BackgroundColor3 = Theme.Background
     main.BorderSizePixel = 0
@@ -791,6 +857,7 @@ local function BuildUI()
         end)
     end
 
+    -- CreateSlider with Correct valLabel Parenting (Fix 2)
     local function CreateSlider(parent, titleText, min, max, initialVal, suffix, callback)
         local frame = Instance.new("Frame")
         frame.Size = UDim2.new(1, 0, 0, 48)
@@ -822,7 +889,7 @@ local function BuildUI()
         valLabel.BackgroundTransparency = 1
         valLabel.Position = UDim2.new(0.6, 0, 0, 6)
         valLabel.Size = UDim2.new(0.38, 0, 0, 16)
-        label.Parent = frame
+        valLabel.Parent = frame -- Fixed: valLabel now properly parented to frame (Fix 2)
 
         local barBg = Instance.new("TextButton")
         barBg.Text = ""
@@ -924,13 +991,24 @@ local function BuildUI()
         end)
     end
 
-    -- Build Combat Tab
+    -- Build Combat Tab (Fix 5: Clean separation between Aim Lock & True Silent Aim)
     local combatPage = pages["Combat"]
-    CreateToggle(combatPage, "Aim Lock / Assist (Hold Right Click)", Config.Combat.AimAssist, function(v) Config.Combat.AimAssist = v end)
+    CreateToggle(combatPage, "Aim Lock (Hold Right Click)", Config.Combat.AimLock, function(v) Config.Combat.AimLock = v end)
     CreateSlider(combatPage, "Aim Lock Strength", 10, 100, math.floor(Config.Combat.AimLockStrength * 100), "%", function(v) Config.Combat.AimLockStrength = v / 100 end)
+    CreateToggle(combatPage, "Silent Aim (Hitbox Expander)", Config.Combat.SilentAim, function(v) 
+        Config.Combat.SilentAim = v 
+        if not v then ResetAllHitboxes() end
+    end)
+    CreateSlider(combatPage, "Hitbox Size", 3, 20, Config.Combat.HitboxSize, " studs", function(v) 
+        Config.Combat.HitboxSize = v 
+    end)
+    CreateDropdown(combatPage, "Hitbox Part", {"Head", "HumanoidRootPart"}, Config.Combat.HitboxPart, function(v) 
+        ResetAllHitboxes()
+        Config.Combat.HitboxPart = v 
+    end)
     CreateToggle(combatPage, "Show FOV Circle", Config.Combat.ShowFOV, function(v) Config.Combat.ShowFOV = v end)
     CreateSlider(combatPage, "FOV Radius", 30, 400, Config.Combat.FOV, "px", function(v) Config.Combat.FOV = v end)
-    CreateDropdown(combatPage, "Hit Part", {"Head", "UpperTorso", "HumanoidRootPart"}, Config.Combat.HitPart, function(v) Config.Combat.HitPart = v end)
+    CreateDropdown(combatPage, "Target Hit Part", {"Head", "UpperTorso", "HumanoidRootPart"}, Config.Combat.HitPart, function(v) Config.Combat.HitPart = v end)
     CreateToggle(combatPage, "Visibility Check (Wallcheck)", Config.Combat.VisibleCheck, function(v) Config.Combat.VisibleCheck = v end)
 
     -- Build Visuals Tab
@@ -978,6 +1056,8 @@ local GuiInstance = BuildUI()
 env.BWXUnload = function()
     Runtime.Active = false
 
+    ResetAllHitboxes()
+
     for _, conn in ipairs(Runtime.Connections) do pcall(function() conn:Disconnect() end) end
     table.clear(Runtime.Connections)
 
@@ -999,4 +1079,4 @@ end
 env.CybrionUnload = env.BWXUnload
 env.BloxStrikeUnload = env.BWXUnload
 
-print("[BWX] Suite v3.3 Loaded. Zero-GC & High-Performance Single-Pass Engine.")
+print("[BWX] Suite v3.4 Loaded. 6/6 Engine & Fix Specifications Applied.")

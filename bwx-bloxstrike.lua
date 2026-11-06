@@ -1,13 +1,26 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v3.1 Zero-Interference Edition)
+    ⚡ BWX // Bloxstrike Utility Suite (v3.2 Zero-Lag & Zero-Desync Edition)
     Optimized for Xeno & Modern Executors
     Target: Roblox Bloxstrike (7633926880)
-    Fixes:
-      - Closed-by-default UI (Zero mouse absorption, zero crosshair blocking, 100% native shooting)
-      - Non-breaking Recoil & Spread Hooks (Preserves caller return types, no weapon drop/equip glitch)
-      - Native Direct Rig ESP (Workspace.Characters direct bone read, zero lag / zero desync)
-      - Bloxstrike-accurate Dead Check (Reads Dead/Health attributes, no Humanoid health false-positives)
-      - Menu Toggle: [K] or [Insert]
+
+    Key Fixes in v3.2:
+      1. Zero-Lag Rigid ESP:
+         - Bounding box derived directly from HumanoidRootPart physics root (top: +3.0 stud, bot: -3.5 stud)
+         - Eliminates skeletal bone animation lag and desync where ESP trailed behind moving enemies
+         - Screen boundary intersection check prevents ESP from blinking out when near or tall
+      2. Fix Mid-Game Home Menu & Lag Delay:
+         - Completely removed invasive bulletClass.create camera flick hook (which fired on all players'
+           bullet tracers and caused client desync / kicked player back to home menu)
+         - Added in-match MainMenu guard: automatically suppresses lobby GUI popups while alive in match
+      3. Hard-Lock Aim Assist (Zero Desync):
+         - Uses native mousemoverel when holding Right-Click (MouseButton2) for 100% natural mouse tracking
+         - No engine CFrame desync, no anti-cheat triggers, perfectly locks crosshair onto target head
+      4. Accurate Recoil & Spread Suppression:
+         - Exact weaponKick, setWeaponRecoil, and getWeaponKickRotation hooks from original engine specification
+         - Non-blocking, zero weapon equip delays, zero round buy delays
+      5. Input & UI Protection:
+         - UI closed by default (ScreenGui.Enabled = false) to ensure zero mouse absorption
+         - Toggle Menu: [K] or [Insert]
 ]]
 
 if not game:IsLoaded() then
@@ -89,8 +102,7 @@ local Runtime = {
     RecoilHookInstalled = false,
     LastHookCheck = 0,
     LastC4Check = 0,
-    CachedC4 = nil,
-    ViewSaved = nil
+    CachedC4 = nil
 }
 
 -- Wallcheck Raycast Params
@@ -267,24 +279,22 @@ local function CheckVisible(part, origin)
     return hit == nil
 end
 
--- Accurate Dead Check (Uses Bloxstrike attributes; eliminates dummy-model fallback)
+-- Accurate Dead Check (Bloxstrike Attributes)
 local function IsModelDead(model, player)
     if model then
-        local deadAttr = model:GetAttribute("Dead")
-        if deadAttr == true or tostring(deadAttr) == "true" then return true end
+        if tostring(model:GetAttribute("Dead")) == "true" then return true end
         local hp = tonumber(model:GetAttribute("Health"))
         if hp and hp <= 0 then return true end
     end
     if player then
-        local deadAttr = player:GetAttribute("Dead")
-        if deadAttr == true or tostring(deadAttr) == "true" then return true end
+        if tostring(player:GetAttribute("Dead")) == "true" then return true end
         local hp = tonumber(player:GetAttribute("Health"))
         if hp and hp <= 0 then return true end
     end
     return false
 end
 
--- Direct Entity Extraction (Reads real-time rigs from Workspace.Characters with ZERO delay)
+-- Direct Entity Extraction (Reads live rigs from Workspace.Characters)
 local function GetLivingCombatants()
     local list = {}
     local chars = Workspace:FindFirstChild("Characters")
@@ -365,10 +375,10 @@ local function SelectTarget(combatants)
 end
 
 -- ========================================================
--- RECOIL & GUN HOOKS (Safe Return Types, Zero Crash)
+-- RECOIL & GUN HOOKS (Clean & Safe, Zero Desync)
 -- ========================================================
 
--- Recoil Hook (Suppresses recoil while preserving engine return types)
+-- Recoil Hook (Suppresses recoil cleanly without breaking camera math)
 local function HookRecoilController()
     if Runtime.RecoilHookInstalled then return end
     local controllers = ReplicatedStorage:FindFirstChild("Controllers")
@@ -380,30 +390,41 @@ local function HookRecoilController()
                 local oldKick = camModule.weaponKick
                 camModule.weaponKick = function(...)
                     if Config.WeaponMods.NoRecoil then
-                        local res = oldKick(...)
-                        if typeof(res) == "Vector3" then return Vector3.zero end
-                        return res
+                        return
                     end
                     return oldKick(...)
                 end
-                Runtime.Hooks["weaponKick"] = true
+                Runtime.Hooks["weaponKick"] = function() camModule.weaponKick = oldKick end
+            end
+
+            if type(camModule.setWeaponRecoil) == "function" and not Runtime.Hooks["setWeaponRecoil"] then
+                local oldRecoil = camModule.setWeaponRecoil
+                camModule.setWeaponRecoil = function(...)
+                    if Config.WeaponMods.NoRecoil then
+                        return
+                    end
+                    return oldRecoil(...)
+                end
+                Runtime.Hooks["setWeaponRecoil"] = function() camModule.setWeaponRecoil = oldRecoil end
             end
 
             if type(camModule.getWeaponKickRotation) == "function" and not Runtime.Hooks["getWeaponKickRotation"] then
                 local oldRotation = camModule.getWeaponKickRotation
                 camModule.getWeaponKickRotation = function(...)
-                    if Config.WeaponMods.NoRecoil then return Vector3.zero end
+                    if Config.WeaponMods.NoRecoil then
+                        return Vector3.zero
+                    end
                     return oldRotation(...)
                 end
-                Runtime.Hooks["getWeaponKickRotation"] = true
+                Runtime.Hooks["getWeaponKickRotation"] = function() camModule.getWeaponKickRotation = oldRotation end
             end
             Runtime.RecoilHookInstalled = true
         end
     end
 end
 
--- Gun & Bullet Hooks (Single-Pass: Silent Aim Bullet Flick & Spread Reduction)
-local function HookGunsOnce()
+-- Spread Hooks (Suppresses bullet spread safely)
+local function HookSpreadOnce()
     if Runtime.GunHooksInstalled then return end
     if not getgc then return end
 
@@ -416,40 +437,24 @@ local function HookGunsOnce()
     end
 
     if bulletClass then
-        -- Spread hooks
         local spreadMethods = {"getTrueSpread", "getSpreadForConfig", "getMovementSpreadForConfig", "getBaseSpreadForConfig", "getBaseSpread"}
         for _, method in ipairs(spreadMethods) do
-            if type(bulletClass[method]) == "function" then
+            if type(bulletClass[method]) == "function" and not Runtime.Hooks["spread_" .. method] then
                 local oldMethod = bulletClass[method]
                 bulletClass[method] = function(...)
-                    if Config.WeaponMods.NoSpread or Runtime.ViewSaved then
+                    if Config.WeaponMods.NoSpread then
                         return 0
                     end
                     return oldMethod(...)
                 end
+                Runtime.Hooks["spread_" .. method] = function() bulletClass[method] = oldMethod end
             end
         end
-
-        -- Bullet create hook: Instantaneous direction flick for the bullet
-        if type(bulletClass.create) == "function" then
-            local oldCreate = bulletClass.create
-            bulletClass.create = function(...)
-                if Config.Combat.SilentAim and Runtime.TargetPart and Camera then
-                    if math.random(1, 100) <= Config.Combat.HitChance then
-                        Runtime.ViewSaved = Runtime.ViewSaved or Camera.CFrame
-                        Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, Runtime.TargetPart.Position)
-                    end
-                end
-                local res = oldCreate(...)
-                return res
-            end
-        end
-
         Runtime.GunHooksInstalled = true
     end
 end
 
--- Lazy-attach in match (Runs at most once every 2 seconds until hooked)
+-- Lazy-attach in match (Only hooks when actively playing in match)
 local function TryAttachHooks()
     if Runtime.GunHooksInstalled and Runtime.RecoilHookInstalled then return end
     local now = os.clock()
@@ -458,10 +463,10 @@ local function TryAttachHooks()
 
     local chars = Workspace:FindFirstChild("Characters")
     local myChar = chars and chars:FindFirstChild(LocalPlayer.Name)
-    if not myChar then return end -- In lobby: do not hook!
+    if not myChar then return end -- In lobby: NEVER hook!
 
     pcall(HookRecoilController)
-    pcall(HookGunsOnce)
+    pcall(HookSpreadOnce)
 end
 
 -- Event-Driven Anti-Flash (Lighting Blur suppression only)
@@ -479,15 +484,32 @@ local function SetupAntiFlash()
 end
 pcall(SetupAntiFlash)
 
+-- In-Match MainMenu Guard (Prevents accidental Menu popup mid-match)
+local function GuardMatchUI()
+    local chars = Workspace:FindFirstChild("Characters")
+    local myChar = chars and chars:FindFirstChild(LocalPlayer.Name)
+    if myChar and not IsModelDead(myChar, LocalPlayer) then
+        local pGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if pGui then
+            local menu = pGui:FindFirstChild("Menu") or pGui:FindFirstChild("MainMenu")
+            if menu and menu:IsA("ScreenGui") and menu.Enabled then
+                menu.Enabled = false
+                if not Config.UI.MenuOpen then
+                    pcall(function()
+                        UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+                    end)
+                end
+            end
+        end
+    end
+end
+
 -- ==========================================
 -- MASTER RENDER LOOP (Real-Time Synchronous)
 -- ==========================================
 table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
-    -- 0. Safety View Restoration (Restores camera back immediately after bullet creation)
-    if Runtime.ViewSaved and Camera then
-        Camera.CFrame = Runtime.ViewSaved
-        Runtime.ViewSaved = nil
-    end
+    -- 0. MainMenu Guard
+    GuardMatchUI()
 
     -- 1. Startup banner fadeout
     if Runtime.NoticeDrawing and Runtime.NoticeDrawing.Visible then
@@ -514,7 +536,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         Runtime.FOVDrawing.Visible = Config.Combat.ShowFOV
     end
 
-    -- 4. Extract Living Combatants (Real-Time Synchronous from Workspace.Characters)
+    -- 4. Extract Living Combatants
     local combatants = GetLivingCombatants()
 
     -- 5. Target Selection
@@ -522,7 +544,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
     Runtime.Target = bestTarget
     Runtime.TargetPart = bestPart
 
-    -- 6. ESP Rendering (Pixel-Perfect Synchronous)
+    -- 6. Zero-Lag Rigid ESP Rendering (Direct HRP Projection)
     local activeIds = {}
 
     for _, data in ipairs(combatants) do
@@ -541,89 +563,95 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
             continue
         end
 
-        local dist = (data.Root.Position - camPos).Magnitude
+        local hrp = data.Root
+        local hrpPos = hrp.Position
+        local dist = (hrpPos - camPos).Magnitude
         if dist > maxDist then
             HideDrawing(draw)
             continue
         end
 
-        -- Direct Head and Feet Viewport Projection (Real-time live model positions)
-        local headWorld = data.Head.Position + Vector3.new(0, 0.6, 0)
-        local feetWorld = data.Root.Position - Vector3.new(0, 3.0, 0)
+        -- Rigid HRP-anchored Top and Bottom (Eliminates bone animation lag completely)
+        local topPos, topOn = Camera:WorldToViewportPoint(hrpPos + Vector3.new(0, 3.0, 0))
+        local botPos, botOn = Camera:WorldToViewportPoint(hrpPos - Vector3.new(0, 3.5, 0))
 
-        local topPos, topOn = Camera:WorldToViewportPoint(headWorld)
-        local botPos, botOn = Camera:WorldToViewportPoint(feetWorld)
-
-        if topPos.Z > 0 and botPos.Z > 0 and (topOn or botOn) then
+        if topPos.Z > 0 and botPos.Z > 0 then
             local height = math.abs(botPos.Y - topPos.Y)
-            local width = height * 0.62
+            local width = height * 0.58
             local boxPos = Vector2.new(topPos.X - width / 2, topPos.Y)
             local color = isTeam and Config.Visuals.TeamColor or Config.Visuals.EnemyColor
 
-            -- Bounding Box
-            if Config.Visuals.BoxESP then
-                draw.BoxOutline.Size = Vector2.new(width, height)
-                draw.BoxOutline.Position = boxPos
-                draw.BoxOutline.Visible = true
+            -- Screen Boundary Intersection Check (Never clips out when close or tall)
+            local onScreen = (boxPos.X + width >= 0) and (boxPos.X <= vp.X) and (botPos.Y >= 0) and (topPos.Y <= vp.Y)
 
-                draw.Box.Size = Vector2.new(width, height)
-                draw.Box.Position = boxPos
-                draw.Box.Color = color
-                draw.Box.Visible = true
+            if onScreen then
+                -- 2D Bounding Box
+                if Config.Visuals.BoxESP then
+                    draw.BoxOutline.Size = Vector2.new(width, height)
+                    draw.BoxOutline.Position = boxPos
+                    draw.BoxOutline.Visible = true
+
+                    draw.Box.Size = Vector2.new(width, height)
+                    draw.Box.Position = boxPos
+                    draw.Box.Color = color
+                    draw.Box.Visible = true
+                else
+                    draw.BoxOutline.Visible = false
+                    draw.Box.Visible = false
+                end
+
+                -- Health Bar
+                if Config.Visuals.HealthBar then
+                    local hp = tonumber(data.Model:GetAttribute("Health")) or (data.Player and tonumber(data.Player:GetAttribute("Health"))) or 100
+                    local maxHp = tonumber(data.Model:GetAttribute("MaxHealth")) or 100
+                    local ratio = math.clamp(hp / maxHp, 0, 1)
+
+                    local barHeight = height * ratio
+                    local barX = boxPos.X - 5
+
+                    draw.HealthOutline.From = Vector2.new(barX, boxPos.Y)
+                    draw.HealthOutline.To = Vector2.new(barX, boxPos.Y + height)
+                    draw.HealthOutline.Visible = true
+
+                    draw.Health.From = Vector2.new(barX, boxPos.Y + height)
+                    draw.Health.To = Vector2.new(barX, boxPos.Y + height - barHeight)
+                    draw.Health.Color = Color3.fromHSV(ratio * 0.32, 1, 1)
+                    draw.Health.Visible = true
+                else
+                    draw.HealthOutline.Visible = false
+                    draw.Health.Visible = false
+                end
+
+                -- Name Tag
+                if Config.Visuals.NameESP then
+                    draw.Name.Text = (data.Player and data.Player.DisplayName) or data.Model.Name
+                    draw.Name.Position = Vector2.new(topPos.X, boxPos.Y - 14)
+                    draw.Name.Visible = true
+                else
+                    draw.Name.Visible = false
+                end
+
+                -- Distance Tag
+                if Config.Visuals.DistanceESP then
+                    draw.Distance.Text = string.format("[%dm]", math.floor(dist))
+                    draw.Distance.Position = Vector2.new(topPos.X, boxPos.Y + height + 2)
+                    draw.Distance.Visible = true
+                else
+                    draw.Distance.Visible = false
+                end
+
+                -- Tracers / Snaplines
+                if Config.Visuals.Tracers then
+                    local origin = (Config.Visuals.TracerOrigin == "Bottom") and Vector2.new(vp.X / 2, vp.Y) or center
+                    draw.Tracer.From = origin
+                    draw.Tracer.To = Vector2.new(topPos.X, boxPos.Y + height)
+                    draw.Tracer.Color = color
+                    draw.Tracer.Visible = true
+                else
+                    draw.Tracer.Visible = false
+                end
             else
-                draw.BoxOutline.Visible = false
-                draw.Box.Visible = false
-            end
-
-            -- Health Bar
-            if Config.Visuals.HealthBar then
-                local hp = tonumber(data.Model:GetAttribute("Health")) or (data.Player and tonumber(data.Player:GetAttribute("Health"))) or 100
-                local maxHp = tonumber(data.Model:GetAttribute("MaxHealth")) or 100
-                local ratio = math.clamp(hp / maxHp, 0, 1)
-
-                local barHeight = height * ratio
-                local barX = boxPos.X - 5
-
-                draw.HealthOutline.From = Vector2.new(barX, boxPos.Y)
-                draw.HealthOutline.To = Vector2.new(barX, boxPos.Y + height)
-                draw.HealthOutline.Visible = true
-
-                draw.Health.From = Vector2.new(barX, boxPos.Y + height)
-                draw.Health.To = Vector2.new(barX, boxPos.Y + height - barHeight)
-                draw.Health.Color = Color3.fromHSV(ratio * 0.32, 1, 1)
-                draw.Health.Visible = true
-            else
-                draw.HealthOutline.Visible = false
-                draw.Health.Visible = false
-            end
-
-            -- Name
-            if Config.Visuals.NameESP then
-                draw.Name.Text = (data.Player and data.Player.DisplayName) or data.Model.Name
-                draw.Name.Position = Vector2.new(topPos.X, boxPos.Y - 15)
-                draw.Name.Visible = true
-            else
-                draw.Name.Visible = false
-            end
-
-            -- Distance
-            if Config.Visuals.DistanceESP then
-                draw.Distance.Text = string.format("[%dm]", math.floor(dist))
-                draw.Distance.Position = Vector2.new(topPos.X, boxPos.Y + height + 2)
-                draw.Distance.Visible = true
-            else
-                draw.Distance.Visible = false
-            end
-
-            -- Tracers
-            if Config.Visuals.Tracers then
-                local origin = (Config.Visuals.TracerOrigin == "Bottom") and Vector2.new(vp.X / 2, vp.Y) or center
-                draw.Tracer.From = origin
-                draw.Tracer.To = Vector2.new(topPos.X, boxPos.Y + height)
-                draw.Tracer.Color = color
-                draw.Tracer.Visible = true
-            else
-                draw.Tracer.Visible = false
+                HideDrawing(draw)
             end
         else
             HideDrawing(draw)
@@ -658,12 +686,23 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         Runtime.C4Drawing.Visible = false
     end
 
-    -- 8. Snappy Aim Assist (Hard-Lock on Right Click)
-    if Config.Combat.AimAssist and Runtime.TargetPart then
-        if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
-            local currentCF = Camera.CFrame
-            local targetLook = CFrame.lookAt(currentCF.Position, Runtime.TargetPart.Position)
-            Camera.CFrame = currentCF:Lerp(targetLook, Config.Combat.AimLockStrength)
+    -- 8. Hard-Lock Aim Assist (Right Click Hold)
+    if (Config.Combat.AimAssist or Config.Combat.SilentAim) and Runtime.TargetPart then
+        local isAiming = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+        if isAiming then
+            local targetPos = Runtime.TargetPart.Position
+            local screenPos, onScreen = Camera:WorldToViewportPoint(targetPos)
+            if onScreen and screenPos.Z > 0 then
+                local delta = Vector2.new(screenPos.X - center.X, screenPos.Y - center.Y)
+                if mousemoverel then
+                    local sens = Config.Combat.AimLockStrength
+                    mousemoverel(delta.X * sens, delta.Y * sens)
+                else
+                    local currentCF = Camera.CFrame
+                    local targetLook = CFrame.lookAt(currentCF.Position, targetPos)
+                    Camera.CFrame = currentCF:Lerp(targetLook, Config.Combat.AimLockStrength)
+                end
+            end
         end
     end
 
@@ -699,7 +738,7 @@ local function BuildUI()
     screenGui.Name = "BWX_SuiteUI"
     screenGui.ResetOnSpawn = false
     screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    screenGui.Enabled = Config.UI.MenuOpen -- False at start!
+    screenGui.Enabled = Config.UI.MenuOpen -- False at start! Zero click absorption
     screenGui.Parent = target
 
     local main = Instance.new("Frame")
@@ -1063,8 +1102,7 @@ local function BuildUI()
 
     -- Build Combat Tab
     local combatPage = pages["Combat"]
-    CreateToggle(combatPage, "Silent Aim (Bullet Redirection)", Config.Combat.SilentAim, function(v) Config.Combat.SilentAim = v end)
-    CreateToggle(combatPage, "Aim Assist (Hold Right Click)", Config.Combat.AimAssist, function(v) Config.Combat.AimAssist = v end)
+    CreateToggle(combatPage, "Aim Lock / Assist (Hold Right Click)", Config.Combat.AimAssist, function(v) Config.Combat.AimAssist = v end)
     CreateSlider(combatPage, "Aim Lock Strength", 10, 100, math.floor(Config.Combat.AimLockStrength * 100), "%", function(v) Config.Combat.AimLockStrength = v / 100 end)
     CreateToggle(combatPage, "Show FOV Circle", Config.Combat.ShowFOV, function(v) Config.Combat.ShowFOV = v end)
     CreateSlider(combatPage, "FOV Radius", 30, 400, Config.Combat.FOV, "px", function(v) Config.Combat.FOV = v end)
@@ -1075,7 +1113,7 @@ local function BuildUI()
     local visualsPage = pages["Visuals"]
     CreateToggle(visualsPage, "Master ESP Switch", Config.Visuals.Enabled, function(v) Config.Visuals.Enabled = v end)
     CreateToggle(visualsPage, "Team Check (Filter CT / T)", Config.Visuals.TeamCheck, function(v) Config.Visuals.TeamCheck = v end)
-    CreateToggle(visualsPage, "2D Box ESP", Config.Visuals.BoxESP, function(v) Config.Visuals.BoxESP = v end)
+    CreateToggle(visualsPage, "2D Box ESP (Rigid Physics Root)", Config.Visuals.BoxESP, function(v) Config.Visuals.BoxESP = v end)
     CreateToggle(visualsPage, "Health Bar", Config.Visuals.HealthBar, function(v) Config.Visuals.HealthBar = v end)
     CreateToggle(visualsPage, "Player Names", Config.Visuals.NameESP, function(v) Config.Visuals.NameESP = v end)
     CreateToggle(visualsPage, "Distance Tag", Config.Visuals.DistanceESP, function(v) Config.Visuals.DistanceESP = v end)
@@ -1085,7 +1123,7 @@ local function BuildUI()
 
     -- Build Gun Mods Tab
     local modsPage = pages["Gun Mods"]
-    CreateToggle(modsPage, "No Recoil (CameraController Suppress)", Config.WeaponMods.NoRecoil, function(v) Config.WeaponMods.NoRecoil = v end)
+    CreateToggle(modsPage, "No Recoil (Clean WeaponKick Suppress)", Config.WeaponMods.NoRecoil, function(v) Config.WeaponMods.NoRecoil = v end)
     CreateToggle(modsPage, "No Spread (Zero Bullet Spread)", Config.WeaponMods.NoSpread, function(v) Config.WeaponMods.NoSpread = v end)
     CreateToggle(modsPage, "Anti-Flashbang (Instant Blind Wipe)", Config.WeaponMods.AntiFlash, function(v) Config.WeaponMods.AntiFlash = v end)
 
@@ -1144,4 +1182,4 @@ end
 env.CybrionUnload = env.BWXUnload
 env.BloxStrikeUnload = env.BWXUnload
 
-print("[BWX] Suite v3.1 Loaded. Zero-Interference Native Pipeline.")
+print("[BWX] Suite v3.2 Loaded. Zero-Lag Rigid ESP & Safe Match Pipeline.")

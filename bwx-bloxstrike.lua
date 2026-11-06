@@ -1,21 +1,23 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v3.8 Non-Invasive Recoil & Spread Edition)
+    ⚡ BWX // Bloxstrike Utility Suite (v3.9 Pure Vertical Recoil & Stabilization Edition)
     Optimized for Xeno & Modern Executors
     Target: Roblox Bloxstrike (7633926880)
 
-    Architectural Updates in v3.8:
-      TASK 1: Full Removal of Invasive Hooks:
-        - Deleted SetupNoRecoil and SetupNoSpread functions completely.
-        - Eliminated all hookfunction and hookmetamethod calls to CameraController & Workspace.Raycast.
-        - Preserved 100% native engine replication, weapon purchases, and round state machines.
-      TASK 2: Non-Invasive No Recoil (Physical Mouse Compensation):
-        - Frame-by-frame camera pitch and yaw delta tracking inside RenderStepped.
-        - When firing (holding LMB), automatically counters camera kick via mousemoverel.
-        - Seamlessly merges with AimLock (recoil compensation only acts when AimLock is not tracking).
-      TASK 3: Non-Invasive No Spread (Property / Attribute Overwrite):
-        - Scans equipped Tool and ReplicatedStorage definitions for Spread/BaseSpread/MinSpread.
-        - Overwrites spread attributes to 0 without intercepting raycasts or firing remotes.
+    Architectural Updates in v3.9:
+      TASK 1: Elimination of Yaw Wrap-Around & Horizontal Spin:
+        - Removed all horizontal camera compensation (compX = 0).
+        - Prevents screen spinning caused by Camera.CFrame yaw angle wrapping (-180 to 180 degrees).
+      TASK 2: Zero-Feedback Pure Vertical Pitch Counter:
+        - Stripped UserInputService:GetMouseDelta() to prevent recursive input acceleration loops.
+        - Measures strictly upward pitch delta (dPitch > 0) during LMB firing.
+        - Counteracts vertical muzzle climb via downward mousemoverel(0, compY).
+      TASK 3: Recoil Control Strength Slider:
+        - Added configurable strength slider (1% to 100%, default 50%) in Gun Mods tab.
+        - Scales downward compensation dynamically to match user sensitivity.
+      TASK 4: Seamless Aimlock Arbitration:
+        - Recoil compensation yields whenever Aimlock actively tracks a target to avoid conflicting deltas.
       PRESERVED CORE ARCHITECTURE:
+        - Non-invasive property/attribute overwrite No Spread (zero hooks/replication safe).
         - LMB Aimlock (MouseButton1) with smooth 0.22 tracking and LockCenter enforcement.
         - Position Caching ESP with 1-second grace period for occluded/streamed models behind walls.
         - Head-only Hitbox Expander with safe memory restoration.
@@ -75,6 +77,7 @@ local Config = {
     },
     WeaponMods = {
         NoRecoil = true,
+        RecoilStrength = 50, -- Recoil Control Strength (1% - 100%)
         NoSpread = true,
         AntiFlash = true
     },
@@ -94,7 +97,6 @@ local Runtime = {
     OriginalSizes = {}, -- For safe Hitbox Expander restoration
     CachedPositions = {}, -- Task 2: Position Caching for StreamingEnabled / Occlusion
     LastPitch = nil,
-    LastYaw = nil,
     FOVDrawing = nil,
     C4Drawing = nil,
     NoticeDrawing = nil,
@@ -869,40 +871,31 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- TASK 2: Non-Invasive No Recoil (Physical Mouse Compensation)
-    -- Operates when firing and not actively Aimlocking onto an entity
-    local curPitch, curYaw = Camera.CFrame:ToOrientation()
+    -- TASK 2: Pure Vertical No Recoil (Mouse Compensation)
+    -- Operates when firing and NOT actively Aimlocking onto an entity
+    local curPitch = Camera.CFrame:ToOrientation()
     if Config.WeaponMods.NoRecoil and isFiring and not isAimlocking and not Config.UI.MenuOpen and not UserInputService:GetFocusedTextBox() then
-        if Runtime.LastPitch and Runtime.LastYaw then
+        if Runtime.LastPitch then
             local dPitch = curPitch - Runtime.LastPitch
-            local dYaw = curYaw - Runtime.LastYaw
-            local userMouse = UserInputService:GetMouseDelta()
+            -- If the camera pitched up while firing, apply downward mouse compensation
+            if dPitch > 0.0001 then
+                local radToPixY = Camera.ViewportSize.Y / math.rad(Camera.FieldOfView)
+                local mult = (Config.WeaponMods.RecoilStrength or 50) / 100
+                local compY = dPitch * radToPixY * mult
 
-            -- Convert angular rotation delta to viewport pixel delta
-            local radToPixY = Camera.ViewportSize.Y / math.rad(Camera.FieldOfView)
-            local radToPixX = Camera.ViewportSize.X / math.rad(Camera.FieldOfView)
+                -- Clamp downward compensation to avoid erratic snapping
+                compY = math.clamp(compY, 0, 30)
 
-            local kickY = dPitch * radToPixY
-            local kickX = -dYaw * radToPixX
-
-            -- Subtract user intentional hand movement
-            local compY = kickY - userMouse.Y
-            local compX = kickX - userMouse.X
-
-            -- Clamp compensation to avoid erratic snapping
-            compY = math.clamp(compY, -25, 25)
-            compX = math.clamp(compX, -25, 25)
-
-            if (math.abs(compY) > 0.3 or math.abs(compX) > 0.3) and mousemoverel then
-                if UserInputService.MouseBehavior ~= Enum.MouseBehavior.LockCenter then
-                    pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter end)
+                if compY > 0.1 and mousemoverel then
+                    if UserInputService.MouseBehavior ~= Enum.MouseBehavior.LockCenter then
+                        pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter end)
+                    end
+                    mousemoverel(0, compY)
                 end
-                mousemoverel(compX * 0.85, compY * 0.85)
             end
         end
     end
     Runtime.LastPitch = curPitch
-    Runtime.LastYaw = curYaw
 
     -- 7. Bunnyhop
     if Config.Movement.Bhop and UserInputService:IsKeyDown(Enum.KeyCode.Space) then
@@ -1327,10 +1320,13 @@ local function BuildUI()
     CreateToggle(visualsPage, "C4 Bomb Tracker", Config.Visuals.C4Tracker, function(v) Config.Visuals.C4Tracker = v end)
     CreateSlider(visualsPage, "Max ESP Distance", 500, 8000, Config.Visuals.MaxDistance, "m", function(v) Config.Visuals.MaxDistance = v end)
 
-    -- Build Gun Mods Tab (Non-Invasive Recoil & Spread Toggles)
+    -- Build Gun Mods Tab (Pure Vertical Recoil & Non-Invasive Spread)
     local modsPage = pages["Gun Mods"]
-    CreateToggle(modsPage, "No Recoil (Mouse Compensation)", Config.WeaponMods.NoRecoil, function(v) 
+    CreateToggle(modsPage, "No Recoil (Pure Vertical)", Config.WeaponMods.NoRecoil, function(v) 
         Config.WeaponMods.NoRecoil = v 
+    end)
+    CreateSlider(modsPage, "Recoil Control Strength", 1, 100, Config.WeaponMods.RecoilStrength, "%", function(v) 
+        Config.WeaponMods.RecoilStrength = v 
     end)
     CreateToggle(modsPage, "No Spread (Attribute Overwrite)", Config.WeaponMods.NoSpread, function(v) 
         Config.WeaponMods.NoSpread = v 
@@ -1392,4 +1388,4 @@ end
 env.CybrionUnload = env.BWXUnload
 env.BloxStrikeUnload = env.BWXUnload
 
-print("[BWX] Suite v3.8 Loaded. Non-Invasive Recoil & Spread Pipeline.")
+print("[BWX] Suite v3.9 Loaded. Pure Vertical Recoil & Stabilization Pipeline.")

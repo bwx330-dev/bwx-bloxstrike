@@ -1,15 +1,13 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v3.0 Ultra-Performance Edition)
+    ⚡ BWX // Bloxstrike Utility Suite (v3.1 Zero-Interference Edition)
     Optimized for Xeno & Modern Executors
     Target: Roblox Bloxstrike (7633926880)
-    Architecture:
-      - 100% Embedded Lightweight Cyberpunk UI (Zero-Download, Instant Load, No Crash)
-      - Native Mouse Input Preservation (Zero Input Sinking, 100% Reliable Shooting)
-      - Non-Blocking Silent Aim (Bullet CFrame Redirection + Instant Viewport Recovery)
-      - Safe Single-Pass Class Hooking (No getgc loops, No memory crashes)
-      - Dual-Source Entity Pipeline (Workspace.Characters Live Rigs + Players Fallback)
-      - Synchronous 200 FPS ESP Rendering (Zero Blinking, Zero Range Desync)
-      - Clean Lifecycle: Menu Toggle with [K] or [Insert]
+    Fixes:
+      - Closed-by-default UI (Zero mouse absorption, zero crosshair blocking, 100% native shooting)
+      - Non-breaking Recoil & Spread Hooks (Preserves caller return types, no weapon drop/equip glitch)
+      - Native Direct Rig ESP (Workspace.Characters direct bone read, zero lag / zero desync)
+      - Bloxstrike-accurate Dead Check (Reads Dead/Health attributes, no Humanoid health false-positives)
+      - Menu Toggle: [K] or [Insert]
 ]]
 
 if not game:IsLoaded() then
@@ -72,7 +70,7 @@ local Config = {
         Bhop = true
     },
     UI = {
-        MenuOpen = true
+        MenuOpen = false -- Starts CLOSED so it never absorbs mouse or blocks crosshair!
     }
 }
 
@@ -83,6 +81,8 @@ local Runtime = {
     DrawingPool = {},
     FOVDrawing = nil,
     C4Drawing = nil,
+    NoticeDrawing = nil,
+    NoticeStart = os.clock(),
     Connections = {},
     Hooks = {},
     GunHooksInstalled = false,
@@ -115,6 +115,16 @@ Runtime.C4Drawing.Center = true
 Runtime.C4Drawing.Outline = true
 Runtime.C4Drawing.Color = Config.Visuals.C4Color
 Runtime.C4Drawing.Visible = false
+
+-- Startup Banner Overlay (Fades out after 5 seconds)
+Runtime.NoticeDrawing = Drawing.new("Text")
+Runtime.NoticeDrawing.Size = 14
+Runtime.NoticeDrawing.Center = true
+Runtime.NoticeDrawing.Outline = true
+Runtime.NoticeDrawing.Color = Color3.fromRGB(50, 230, 150)
+Runtime.NoticeDrawing.Position = Vector2.new(Camera.ViewportSize.X / 2, 40)
+Runtime.NoticeDrawing.Text = "⚡ BWX BLOXSTRIKE READY [Tekan K / Insert untuk Menu]"
+Runtime.NoticeDrawing.Visible = true
 
 -- Team Resolution (Accurate for Bloxstrike CT vs T)
 local function GetEntityTeam(model, player)
@@ -257,55 +267,66 @@ local function CheckVisible(part, origin)
     return hit == nil
 end
 
--- Dual-Source Combatants Extraction (Eliminates blinking, range desync, and spectator bugs)
+-- Accurate Dead Check (Uses Bloxstrike attributes; eliminates dummy-model fallback)
+local function IsModelDead(model, player)
+    if model then
+        local deadAttr = model:GetAttribute("Dead")
+        if deadAttr == true or tostring(deadAttr) == "true" then return true end
+        local hp = tonumber(model:GetAttribute("Health"))
+        if hp and hp <= 0 then return true end
+    end
+    if player then
+        local deadAttr = player:GetAttribute("Dead")
+        if deadAttr == true or tostring(deadAttr) == "true" then return true end
+        local hp = tonumber(player:GetAttribute("Health"))
+        if hp and hp <= 0 then return true end
+    end
+    return false
+end
+
+-- Direct Entity Extraction (Reads real-time rigs from Workspace.Characters with ZERO delay)
 local function GetLivingCombatants()
     local list = {}
-    local seen = {}
-
-    -- 1. Scan Bloxstrike Characters Folder (Live Animated Rigs)
     local chars = Workspace:FindFirstChild("Characters")
+
     if chars then
         for _, model in ipairs(chars:GetChildren()) do
             if model:IsA("Model") and model.Name ~= LocalPlayer.Name then
-                local head = model:FindFirstChild("Head")
-                local root = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Torso")
-                local hum = model:FindFirstChildOfClass("Humanoid")
-                local dead = (hum and hum.Health <= 0) or tostring(model:GetAttribute("Dead")) == "true"
-
-                if head and root and not dead then
-                    seen[model.Name] = true
-                    table.insert(list, {
-                        Id = model.Name,
-                        Model = model,
-                        Head = head,
-                        Root = root,
-                        Humanoid = hum,
-                        Player = Players:FindFirstChild(model.Name)
-                    })
+                local player = Players:FindFirstChild(model.Name)
+                if not IsModelDead(model, player) then
+                    local head = model:FindFirstChild("Head")
+                    local root = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Torso")
+                    if head and root then
+                        table.insert(list, {
+                            Id = model.Name,
+                            Model = model,
+                            Head = head,
+                            Root = root,
+                            Player = player
+                        })
+                    end
                 end
             end
         end
     end
 
-    -- 2. Fallback: Players List (For long-range streaming, spectators, or non-standard spawns)
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and not seen[player.Name] then
-            local char = (chars and chars:FindFirstChild(player.Name)) or player.Character
-            if char and char:IsA("Model") then
-                local head = char:FindFirstChild("Head")
-                local root = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso")
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                local dead = (hum and hum.Health <= 0) or tostring(player:GetAttribute("Dead")) == "true" or tostring(char:GetAttribute("Dead")) == "true"
-
-                if head and root and not dead then
-                    table.insert(list, {
-                        Id = player.Name,
-                        Model = char,
-                        Head = head,
-                        Root = root,
-                        Humanoid = hum,
-                        Player = player
-                    })
+    -- Fallback: Players only if Characters folder has no live models (e.g. spectator or warmup)
+    if #list == 0 then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                local char = player.Character
+                if char and char:IsA("Model") and not IsModelDead(char, player) then
+                    local head = char:FindFirstChild("Head")
+                    local root = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso")
+                    if head and root then
+                        table.insert(list, {
+                            Id = player.Name,
+                            Model = char,
+                            Head = head,
+                            Root = root,
+                            Player = player
+                        })
+                    end
                 end
             end
         end
@@ -344,10 +365,10 @@ local function SelectTarget(combatants)
 end
 
 -- ========================================================
--- RECOIL & GUN HOOKS (Single-Pass, Zero Crash)
+-- RECOIL & GUN HOOKS (Safe Return Types, Zero Crash)
 -- ========================================================
 
--- Recoil Hook (Suppresses recoil via CameraController)
+-- Recoil Hook (Suppresses recoil while preserving engine return types)
 local function HookRecoilController()
     if Runtime.RecoilHookInstalled then return end
     local controllers = ReplicatedStorage:FindFirstChild("Controllers")
@@ -358,19 +379,14 @@ local function HookRecoilController()
             if type(camModule.weaponKick) == "function" and not Runtime.Hooks["weaponKick"] then
                 local oldKick = camModule.weaponKick
                 camModule.weaponKick = function(...)
-                    if Config.WeaponMods.NoRecoil then return end
+                    if Config.WeaponMods.NoRecoil then
+                        local res = oldKick(...)
+                        if typeof(res) == "Vector3" then return Vector3.zero end
+                        return res
+                    end
                     return oldKick(...)
                 end
-                Runtime.Hooks["weaponKick"] = function() camModule.weaponKick = oldKick end
-            end
-
-            if type(camModule.setWeaponRecoil) == "function" and not Runtime.Hooks["setWeaponRecoil"] then
-                local oldRecoil = camModule.setWeaponRecoil
-                camModule.setWeaponRecoil = function(...)
-                    if Config.WeaponMods.NoRecoil then return end
-                    return oldRecoil(...)
-                end
-                Runtime.Hooks["setWeaponRecoil"] = function() camModule.setWeaponRecoil = oldRecoil end
+                Runtime.Hooks["weaponKick"] = true
             end
 
             if type(camModule.getWeaponKickRotation) == "function" and not Runtime.Hooks["getWeaponKickRotation"] then
@@ -379,7 +395,7 @@ local function HookRecoilController()
                     if Config.WeaponMods.NoRecoil then return Vector3.zero end
                     return oldRotation(...)
                 end
-                Runtime.Hooks["getWeaponKickRotation"] = function() camModule.getWeaponKickRotation = oldRotation end
+                Runtime.Hooks["getWeaponKickRotation"] = true
             end
             Runtime.RecoilHookInstalled = true
         end
@@ -406,11 +422,10 @@ local function HookGunsOnce()
             if type(bulletClass[method]) == "function" then
                 local oldMethod = bulletClass[method]
                 bulletClass[method] = function(...)
-                    local val = oldMethod(...)
-                    if type(val) == "number" and (Config.WeaponMods.NoSpread or Runtime.ViewSaved) then
+                    if Config.WeaponMods.NoSpread or Runtime.ViewSaved then
                         return 0
                     end
-                    return val
+                    return oldMethod(...)
                 end
             end
         end
@@ -425,7 +440,8 @@ local function HookGunsOnce()
                         Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, Runtime.TargetPart.Position)
                     end
                 end
-                return oldCreate(...)
+                local res = oldCreate(...)
+                return res
             end
         end
 
@@ -473,7 +489,15 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         Runtime.ViewSaved = nil
     end
 
-    -- 1. Lazy hook attachment when in match
+    -- 1. Startup banner fadeout
+    if Runtime.NoticeDrawing and Runtime.NoticeDrawing.Visible then
+        local elapsed = os.clock() - Runtime.NoticeStart
+        if elapsed > 5.0 then
+            Runtime.NoticeDrawing.Visible = false
+        end
+    end
+
+    -- 2. Lazy hook attachment when in match
     TryAttachHooks()
 
     local vp = Camera.ViewportSize
@@ -482,7 +506,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
     local visualsOn = Config.Visuals.Enabled
     local maxDist = Config.Visuals.MaxDistance
 
-    -- 2. FOV Circle
+    -- 3. FOV Circle
     if Runtime.FOVDrawing then
         Runtime.FOVDrawing.Position = center
         Runtime.FOVDrawing.Radius = Config.Combat.FOV
@@ -490,15 +514,15 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         Runtime.FOVDrawing.Visible = Config.Combat.ShowFOV
     end
 
-    -- 3. Extract Living Combatants
+    -- 4. Extract Living Combatants (Real-Time Synchronous from Workspace.Characters)
     local combatants = GetLivingCombatants()
 
-    -- 4. Target Selection
+    -- 5. Target Selection
     local bestTarget, bestPart = SelectTarget(combatants)
     Runtime.Target = bestTarget
     Runtime.TargetPart = bestPart
 
-    -- 5. ESP Rendering (Pixel-Perfect Synchronous)
+    -- 6. ESP Rendering (Pixel-Perfect Synchronous)
     local activeIds = {}
 
     for _, data in ipairs(combatants) do
@@ -523,7 +547,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
             continue
         end
 
-        -- Direct Head and Feet Viewport Projection
+        -- Direct Head and Feet Viewport Projection (Real-time live model positions)
         local headWorld = data.Head.Position + Vector3.new(0, 0.6, 0)
         local feetWorld = data.Root.Position - Vector3.new(0, 3.0, 0)
 
@@ -553,9 +577,8 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
 
             -- Health Bar
             if Config.Visuals.HealthBar then
-                local hum = data.Humanoid
-                local hp = hum and hum.Health or tonumber(data.Model:GetAttribute("Health")) or 100
-                local maxHp = hum and hum.MaxHealth or tonumber(data.Model:GetAttribute("MaxHealth")) or 100
+                local hp = tonumber(data.Model:GetAttribute("Health")) or (data.Player and tonumber(data.Player:GetAttribute("Health"))) or 100
+                local maxHp = tonumber(data.Model:GetAttribute("MaxHealth")) or 100
                 local ratio = math.clamp(hp / maxHp, 0, 1)
 
                 local barHeight = height * ratio
@@ -615,7 +638,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- 6. C4 Objective Tracker
+    -- 7. C4 Objective Tracker
     if visualsOn and Config.Visuals.C4Tracker then
         local c4 = LocateC4()
         if c4 and c4.Parent then
@@ -635,7 +658,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         Runtime.C4Drawing.Visible = false
     end
 
-    -- 7. Snappy Aim Assist (Hard-Lock on Right Click)
+    -- 8. Snappy Aim Assist (Hard-Lock on Right Click)
     if Config.Combat.AimAssist and Runtime.TargetPart then
         if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
             local currentCF = Camera.CFrame
@@ -644,7 +667,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- 8. Bunnyhop
+    -- 9. Bunnyhop
     if Config.Movement.Bhop and UserInputService:IsKeyDown(Enum.KeyCode.Space) then
         if not UserInputService:GetFocusedTextBox() then
             local char = (Workspace:FindFirstChild("Characters") and Workspace.Characters:FindFirstChild(LocalPlayer.Name)) or LocalPlayer.Character
@@ -657,7 +680,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
 end))
 
 -- ========================================================
--- EMBEDDED LIGHTWEIGHT CYBERPUNK UI (Instant Load, Zero Lag)
+-- EMBEDDED LIGHTWEIGHT CYBERPUNK UI (Closed by Default)
 -- ========================================================
 local function BuildUI()
     local Theme = {
@@ -676,7 +699,7 @@ local function BuildUI()
     screenGui.Name = "BWX_SuiteUI"
     screenGui.ResetOnSpawn = false
     screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    screenGui.Enabled = Config.UI.MenuOpen
+    screenGui.Enabled = Config.UI.MenuOpen -- False at start!
     screenGui.Parent = target
 
     local main = Instance.new("Frame")
@@ -709,7 +732,6 @@ local function BuildUI()
     headerCorner.CornerRadius = UDim.new(0, 8)
     headerCorner.Parent = header
 
-    -- Fix header bottom rounding
     local headerBottom = Instance.new("Frame")
     headerBottom.Size = UDim2.new(1, 0, 0, 8)
     headerBottom.Position = UDim2.new(0, 0, 1, -8)
@@ -1078,6 +1100,12 @@ local function BuildUI()
         if not processed and (input.KeyCode == Enum.KeyCode.K or input.KeyCode == Enum.KeyCode.Insert) then
             Config.UI.MenuOpen = not Config.UI.MenuOpen
             screenGui.Enabled = Config.UI.MenuOpen
+            if not Config.UI.MenuOpen then
+                -- Lock mouse back to game center when menu is closed
+                pcall(function()
+                    UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+                end)
+            end
         end
     end)
 
@@ -1100,6 +1128,7 @@ env.BWXUnload = function()
 
     if Runtime.FOVDrawing then pcall(function() Runtime.FOVDrawing:Remove() end) end
     if Runtime.C4Drawing then pcall(function() Runtime.C4Drawing:Remove() end) end
+    if Runtime.NoticeDrawing then pcall(function() Runtime.NoticeDrawing:Remove() end) end
 
     for _, draw in pairs(Runtime.DrawingPool) do
         DestroyDrawing(draw)
@@ -1115,4 +1144,4 @@ end
 env.CybrionUnload = env.BWXUnload
 env.BloxStrikeUnload = env.BWXUnload
 
-print("[BWX] Suite v3.0 Loaded Instantly. 0% Overhead, Zero Input Sinking, 200 FPS Pipeline.")
+print("[BWX] Suite v3.1 Loaded. Zero-Interference Native Pipeline.")

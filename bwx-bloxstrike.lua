@@ -1,25 +1,19 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v3.5 Precision Edition)
+    ⚡ BWX // Bloxstrike Utility Suite (v3.6 Production Edition)
     Optimized for Xeno & Modern Executors
     Target: Roblox Bloxstrike (7633926880)
 
-    Key Fixes in v3.5:
-      1. Fixed Hitbox Expander 60Hz Reset / Flicker:
-         - Decoupled hitbox cleanup from activeIds[part.Parent.Name].
-         - Hitbox cleanup now verifies true object existence (head:IsDescendantOf(Workspace) and not IsModelDead).
-         - Eliminates the frame-by-frame resize/reset loop, making Aimlock and Hitbox Expander 100% steady.
-      2. Aimlock Grip & Smooth Tracking Fix:
-         - Reduced default AimLockStrength to 0.22 (smooth magnetic pull instead of 0.95 instant teleports).
-         - Automatically enforces UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter when aiming,
-           ensuring mousemoverel directly rotates the 3D first-person camera.
-      3. ESP Box Decoupling (Head-Only Hitbox Expansion):
-         - Hitbox Expander is strictly scoped to Head only (no HumanoidRootPart distortion).
-         - Keeps HumanoidRootPart unscaled, anchoring ESP bounding box rigidly to true character physics root.
-      4. Watertight Team Check:
-         - Multi-tier team resolution: checks Team, TeamId (1=CT, 2=T), TeamName, Role, TeamColor (BrickColor),
-           CharacterName, and static CTCharacter/TCharacter attributes.
-         - Includes Gamemode check for Deathmatch/FFA (all players treated as enemies).
-         - Guard clause prevents false-positive teammate flags on death.
+    Architectural Updates in v3.6:
+      TASK 1: LMB Aimlock (MouseButton1) & UI Update:
+        - Aimlock trigger changed from MouseButton2 (RMB) to MouseButton1 (LMB).
+        - Aim pulls towards target exclusively when player is actively firing / holding LMB.
+        - UI label updated to "Aim Lock (Hold LMB / Fire)".
+        - Full FOV radius constraint preserved (only locks targets inside circle).
+      TASK 2: ESP Streaming/Unload Fix (Position Caching):
+        - Mitigates StreamingEnabled / occlusion culling where character models stream out behind walls.
+        - Position Caching system in Runtime.CachedPositions records live coordinates each frame.
+        - When an enemy model is occluded/unloaded, renders ESP from cached coordinates for a 1-second grace period.
+        - Eliminates instant disappearing / flickering behind walls.
 ]]
 
 if not game:IsLoaded() then
@@ -88,6 +82,7 @@ local Runtime = {
     TargetPart = nil,
     DrawingPool = {},
     OriginalSizes = {}, -- For safe Hitbox Expander restoration
+    CachedPositions = {}, -- Task 2: Position Caching for StreamingEnabled / Occlusion
     FOVDrawing = nil,
     C4Drawing = nil,
     NoticeDrawing = nil,
@@ -130,7 +125,7 @@ Runtime.NoticeDrawing.Position = Vector2.new(Camera.ViewportSize.X / 2, 40)
 Runtime.NoticeDrawing.Text = "⚡ BWX BLOXSTRIKE READY [Tekan K / Insert untuk Menu]"
 Runtime.NoticeDrawing.Visible = true
 
--- Team Normalization (Fix 4: Resolves TeamId 1/2, TeamColor, Role, TeamName)
+-- Team Normalization (Resolves TeamId 1/2, TeamColor, Role, TeamName)
 local function NormalizeTeam(val)
     if val == nil then return nil end
     local s = tostring(val):lower()
@@ -198,7 +193,7 @@ local function GetEntityTeam(model, player)
     return nil
 end
 
--- Team check with dead / unspawned guard clause and FFA check (Fix 4)
+-- Team check with dead / unspawned guard clause and FFA check
 local function IsTeammate(model, player)
     if not Config.Visuals.TeamCheck then return false end
     if player == LocalPlayer or (model and model.Name == LocalPlayer.Name) then return true end
@@ -327,7 +322,7 @@ local function IsModelDead(model, player)
     return false
 end
 
--- Hitbox Expander Logic (Fix 1 & Fix 3: Head-Only Expansion, Zero ESP Distortion)
+-- Hitbox Expander Logic (Head-Only Expansion, Zero ESP Distortion)
 local function ApplyHitbox(model)
     local head = model:FindFirstChild("Head")
     if head and head:IsA("BasePart") then
@@ -402,9 +397,11 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
     -- 0. MainMenu Guard
     GuardMatchUI()
 
+    local now = os.clock()
+
     -- 1. Startup banner fadeout
     if Runtime.NoticeDrawing and Runtime.NoticeDrawing.Visible then
-        local elapsed = os.clock() - Runtime.NoticeStart
+        local elapsed = now - Runtime.NoticeStart
         if elapsed > 5.0 then
             Runtime.NoticeDrawing.Visible = false
         end
@@ -453,7 +450,22 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
                         local rootPos = root.Position
                         local dist = (rootPos - camPos).Magnitude
 
-                        -- Apply Head Hitbox Expander for Enemies (Fix 1 & Fix 3)
+                        local hp = tonumber(model:GetAttribute("Health")) or (player and tonumber(player:GetAttribute("Health"))) or 100
+                        local maxHp = tonumber(model:GetAttribute("MaxHealth")) or 100
+                        local displayName = (player and player.DisplayName) or model.Name
+
+                        -- TASK 2: Update Cached Position every frame the model is visible
+                        Runtime.CachedPositions[id] = {
+                            Position = rootPos,
+                            LastSeen = now,
+                            Team = isTeam,
+                            DisplayName = displayName,
+                            Player = player,
+                            Health = hp,
+                            MaxHealth = maxHp
+                        }
+
+                        -- Apply Head Hitbox Expander for Enemies
                         if Config.Combat.SilentAim and not isTeam then
                             ApplyHitbox(model)
                         end
@@ -491,10 +503,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
 
                                     -- Health Bar
                                     if Config.Visuals.HealthBar then
-                                        local hp = tonumber(model:GetAttribute("Health")) or (player and tonumber(player:GetAttribute("Health"))) or 100
-                                        local maxHp = tonumber(model:GetAttribute("MaxHealth")) or 100
                                         local ratio = math.clamp(hp / maxHp, 0, 1)
-
                                         local barHeight = height * ratio
                                         local barX = boxPos.X - 5
 
@@ -513,7 +522,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
 
                                     -- Name Tag
                                     if Config.Visuals.NameESP then
-                                        draw.Name.Text = (player and player.DisplayName) or model.Name
+                                        draw.Name.Text = displayName
                                         draw.Name.Position = Vector2.new(topPos.X, boxPos.Y - 14)
                                         draw.Name.Visible = true
                                     else
@@ -568,6 +577,125 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
+    -- TASK 2: Position Caching ESP for StreamingEnabled / Occluded Models Behind Walls
+    if visualsOn then
+        for id, cached in pairs(Runtime.CachedPositions) do
+            if not activeIds[id] then
+                -- Purge if dead via player attribute
+                if cached.Player and IsModelDead(nil, cached.Player) then
+                    Runtime.CachedPositions[id] = nil
+                else
+                    local elapsed = now - cached.LastSeen
+                    if elapsed <= 1.0 then -- 1-second grace period
+                        activeIds[id] = true
+                        local isTeam = cached.Team
+
+                        if not (Config.Visuals.TeamCheck and isTeam) then
+                            local rootPos = cached.Position
+                            local dist = (rootPos - camPos).Magnitude
+
+                            if dist <= maxDist then
+                                local topPos, topOn = Camera:WorldToViewportPoint(rootPos + Vector3.new(0, 3.0, 0))
+                                local botPos, botOn = Camera:WorldToViewportPoint(rootPos - Vector3.new(0, 3.5, 0))
+
+                                if topPos.Z > 0 and botPos.Z > 0 then
+                                    local height = math.abs(botPos.Y - topPos.Y)
+                                    local width = height * 0.58
+                                    local boxPos = Vector2.new(topPos.X - width / 2, topPos.Y)
+                                    local onScreen = (boxPos.X + width >= 0) and (boxPos.X <= vp.X) and (botPos.Y >= 0) and (topPos.Y <= vp.Y)
+
+                                    local draw = GetOrCreateDrawing(id)
+
+                                    if onScreen then
+                                        local col = isTeam and Config.Visuals.TeamColor or Config.Visuals.EnemyColor
+
+                                        -- Box ESP
+                                        if Config.Visuals.BoxESP then
+                                            draw.BoxOutline.Size = Vector2.new(width, height)
+                                            draw.BoxOutline.Position = boxPos
+                                            draw.BoxOutline.Visible = true
+
+                                            draw.Box.Size = Vector2.new(width, height)
+                                            draw.Box.Position = boxPos
+                                            draw.Box.Color = col
+                                            draw.Box.Visible = true
+                                        else
+                                            draw.BoxOutline.Visible = false
+                                            draw.Box.Visible = false
+                                        end
+
+                                        -- Health Bar
+                                        if Config.Visuals.HealthBar then
+                                            local ratio = math.clamp(cached.Health / cached.MaxHealth, 0, 1)
+                                            local barHeight = height * ratio
+                                            local barX = boxPos.X - 5
+
+                                            draw.HealthOutline.From = Vector2.new(barX, boxPos.Y)
+                                            draw.HealthOutline.To = Vector2.new(barX, boxPos.Y + height)
+                                            draw.HealthOutline.Visible = true
+
+                                            draw.Health.From = Vector2.new(barX, boxPos.Y + height)
+                                            draw.Health.To = Vector2.new(barX, boxPos.Y + height - barHeight)
+                                            draw.Health.Color = Color3.fromHSV(ratio * 0.32, 1, 1)
+                                            draw.Health.Visible = true
+                                        else
+                                            draw.HealthOutline.Visible = false
+                                            draw.Health.Visible = false
+                                        end
+
+                                        -- Name Tag
+                                        if Config.Visuals.NameESP then
+                                            draw.Name.Text = cached.DisplayName
+                                            draw.Name.Position = Vector2.new(topPos.X, boxPos.Y - 14)
+                                            draw.Name.Visible = true
+                                        else
+                                            draw.Name.Visible = false
+                                        end
+
+                                        -- Distance Tag
+                                        if Config.Visuals.DistanceESP then
+                                            draw.Distance.Text = string.format("[%dm]", math.floor(dist))
+                                            draw.Distance.Position = Vector2.new(topPos.X, boxPos.Y + height + 2)
+                                            draw.Distance.Visible = true
+                                        else
+                                            draw.Distance.Visible = false
+                                        end
+
+                                        -- Tracers
+                                        if Config.Visuals.Tracers then
+                                            local origin = (Config.Visuals.TracerOrigin == "Bottom") and Vector2.new(vp.X / 2, vp.Y) or center
+                                            draw.Tracer.From = origin
+                                            draw.Tracer.To = Vector2.new(topPos.X, boxPos.Y + height)
+                                            draw.Tracer.Color = col
+                                            draw.Tracer.Visible = true
+                                        else
+                                            draw.Tracer.Visible = false
+                                        end
+                                    else
+                                        local draw = Runtime.DrawingPool[id]
+                                        if draw then HideDrawing(draw) end
+                                    end
+                                else
+                                    local draw = Runtime.DrawingPool[id]
+                                    if draw then HideDrawing(draw) end
+                                end
+                            else
+                                local draw = Runtime.DrawingPool[id]
+                                if draw then HideDrawing(draw) end
+                            end
+                        else
+                            local draw = Runtime.DrawingPool[id]
+                            if draw then HideDrawing(draw) end
+                        end
+                    else
+                        -- Expired (> 1s grace period)
+                        Runtime.CachedPositions[id] = nil
+                    end
+                end
+            end
+        end
+    end
+
     -- Cleanup Unused Drawings
     for id, draw in pairs(Runtime.DrawingPool) do
         if not activeIds[id] then
@@ -576,7 +704,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- Cleanup Dead / Removed Hitboxes (Fix 1: Safe Workspace & Dead Check, No activeIds Flicker)
+    -- Cleanup Dead / Removed Hitboxes
     for head, data in pairs(Runtime.OriginalSizes) do
         local model = data.Model
         if not head.Parent or not head:IsDescendantOf(Workspace) or (model and (not model:IsDescendantOf(Workspace) or IsModelDead(model, Players:GetPlayerFromCharacter(model)))) then
@@ -629,9 +757,9 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         Runtime.C4Drawing.Visible = false
     end
 
-    -- 6. Native Input Aim Lock (Fix 2: Smooth 0.22 Tracking & Forced LockCenter)
-    if Config.Combat.AimLock and Runtime.TargetPart then
-        local isAiming = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+    -- 6. Native Input Aim Lock (TASK 1: Hold LMB / Fire via mousemoverel)
+    if Config.Combat.AimLock and Runtime.TargetPart and not Config.UI.MenuOpen and not UserInputService:GetFocusedTextBox() then
+        local isAiming = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
         if isAiming then
             -- Force LockCenter so mousemoverel rotates the first-person camera smoothly
             if UserInputService.MouseBehavior ~= Enum.MouseBehavior.LockCenter then
@@ -948,7 +1076,7 @@ local function BuildUI()
         valLabel.BackgroundTransparency = 1
         valLabel.Position = UDim2.new(0.6, 0, 0, 6)
         valLabel.Size = UDim2.new(0.38, 0, 0, 16)
-        valLabel.Parent = frame -- valLabel properly parented to frame
+        valLabel.Parent = frame
 
         local barBg = Instance.new("TextButton")
         barBg.Text = ""
@@ -1050,9 +1178,9 @@ local function BuildUI()
         end)
     end
 
-    -- Build Combat Tab (Fix 2 & Fix 3)
+    -- Build Combat Tab (TASK 1: Updated to "Aim Lock (Hold LMB / Fire)")
     local combatPage = pages["Combat"]
-    CreateToggle(combatPage, "Aim Lock (Hold Right Click)", Config.Combat.AimLock, function(v) Config.Combat.AimLock = v end)
+    CreateToggle(combatPage, "Aim Lock (Hold LMB / Fire)", Config.Combat.AimLock, function(v) Config.Combat.AimLock = v end)
     CreateSlider(combatPage, "Aim Lock Smoothness", 5, 100, math.floor(Config.Combat.AimLockStrength * 100), "%", function(v) Config.Combat.AimLockStrength = v / 100 end)
     CreateToggle(combatPage, "Silent Aim (Head Hitbox Expander)", Config.Combat.SilentAim, function(v) 
         Config.Combat.SilentAim = v 
@@ -1112,6 +1240,7 @@ env.BWXUnload = function()
     Runtime.Active = false
 
     ResetAllHitboxes()
+    table.clear(Runtime.CachedPositions)
 
     for _, conn in ipairs(Runtime.Connections) do pcall(function() conn:Disconnect() end) end
     table.clear(Runtime.Connections)
@@ -1134,4 +1263,4 @@ end
 env.CybrionUnload = env.BWXUnload
 env.BloxStrikeUnload = env.BWXUnload
 
-print("[BWX] Suite v3.5 Loaded. Precision Tracking & Clean Hitbox Engine.")
+print("[BWX] Suite v3.6 Loaded. LMB Aimlock & Position-Cached ESP Pipeline.")

@@ -1,22 +1,16 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v3.9 Pure Vertical Recoil & Stabilization Edition)
+    ⚡ BWX // Bloxstrike Utility Suite (v3.9.1 Final Pure Vertical Recoil Patch)
     Optimized for Xeno & Modern Executors
     Target: Roblox Bloxstrike (7633926880)
 
-    Architectural Updates in v3.9:
-      TASK 1: Elimination of Yaw Wrap-Around & Horizontal Spin:
-        - Removed all horizontal camera compensation (compX = 0).
-        - Prevents screen spinning caused by Camera.CFrame yaw angle wrapping (-180 to 180 degrees).
-      TASK 2: Zero-Feedback Pure Vertical Pitch Counter:
-        - Stripped UserInputService:GetMouseDelta() to prevent recursive input acceleration loops.
-        - Measures strictly upward pitch delta (dPitch > 0) during LMB firing.
-        - Counteracts vertical muzzle climb via downward mousemoverel(0, compY).
-      TASK 3: Recoil Control Strength Slider:
-        - Added configurable strength slider (1% to 100%, default 50%) in Gun Mods tab.
-        - Scales downward compensation dynamically to match user sensitivity.
-      TASK 4: Seamless Aimlock Arbitration:
-        - Recoil compensation yields whenever Aimlock actively tracks a target to avoid conflicting deltas.
+    Architectural Updates in v3.9.1:
+      FIX: Inverted Pitch Math in No Recoil:
+        - Corrected `dPitch` logic to detect upward recoil (which yields a negative pitch delta).
+        - Applies a positive downward `mousemoverel` compensation.
       PRESERVED CORE ARCHITECTURE:
+        - Pure vertical stabilization (zero horizontal yaw spin).
+        - Zero-feedback counter (no recursive mouse delta tracking).
+        - Recoil Control Strength slider (1% - 100%).
         - Non-invasive property/attribute overwrite No Spread (zero hooks/replication safe).
         - LMB Aimlock (MouseButton1) with smooth 0.22 tracking and LockCenter enforcement.
         - Position Caching ESP with 1-second grace period for occluded/streamed models behind walls.
@@ -871,17 +865,17 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- TASK 2: Pure Vertical No Recoil (Mouse Compensation)
+    -- TASK 2: Pure Vertical No Recoil (Mouse Compensation) - FIXED PITCH LOGIC
     -- Operates when firing and NOT actively Aimlocking onto an entity
     local curPitch = Camera.CFrame:ToOrientation()
     if Config.WeaponMods.NoRecoil and isFiring and not isAimlocking and not Config.UI.MenuOpen and not UserInputService:GetFocusedTextBox() then
         if Runtime.LastPitch then
             local dPitch = curPitch - Runtime.LastPitch
-            -- If the camera pitched up while firing, apply downward mouse compensation
-            if dPitch > 0.0001 then
+            -- If camera pitches UP (negative pitch delta), apply downward compensation
+            if dPitch < -0.0001 then
                 local radToPixY = Camera.ViewportSize.Y / math.rad(Camera.FieldOfView)
                 local mult = (Config.WeaponMods.RecoilStrength or 50) / 100
-                local compY = dPitch * radToPixY * mult
+                local compY = -dPitch * radToPixY * mult -- Negate negative dPitch to get positive downward movement
 
                 -- Clamp downward compensation to avoid erratic snapping
                 compY = math.clamp(compY, 0, 30)
@@ -1388,4 +1382,4 @@ end
 env.CybrionUnload = env.BWXUnload
 env.BloxStrikeUnload = env.BWXUnload
 
-print("[BWX] Suite v3.9 Loaded. Pure Vertical Recoil & Stabilization Pipeline.")
+print("[BWX] Suite v3.9.1 Loaded. Pure Vertical Recoil & Stabilization Pipeline.")

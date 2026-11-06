@@ -1,13 +1,13 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v3.7.1 Laser & Stability Patch)
+    ⚡ BWX // Bloxstrike Utility Suite (v3.7.2 Stability & DeadCheck Patch)
     Optimized for Xeno & Modern Executors
     Target: Roblox Bloxstrike (7633926880)
 
-    Architectural Updates in v3.7.1:
-      BUG 1: WallParams.FilterType Enum Validation:
-        - Ensured Enum.RaycastFilterType.Exclude is used for native engine compliance.
-      BUG 2: CameraController getWeaponKickRotation Type Alignment:
-        - Returned CFrame.Angles(0, 0, 0) instead of Vector3.zero to match camera matrix expectations.
+    Architectural Updates in v3.7.2:
+      BUG FIX: Robust Dual-Target Dead Check (IsModelDead):
+        - Guarded model against nil references when evaluating occluded/streamed entities from position cache.
+        - Full player fallback checking Player.Attributes (Dead, IsDead, Health).
+        - Safe Humanoid health verification without crashing RenderStepped loop.
       PRESERVED CORE ARCHITECTURE:
         - Zero-GC No Recoil (CameraController suppression) & No Spread (Workspace.Raycast redirection).
         - LMB Aimlock (MouseButton1) with smooth 0.22 tracking and LockCenter enforcement.
@@ -435,18 +435,37 @@ local function LocateC4()
     return Runtime.CachedC4
 end
 
--- Accurate Dead Check (Bloxstrike Attributes)
+-- Accurate Dead Check (Bloxstrike Attributes & Humanoid Fallback)
 local function IsModelDead(model, player)
     if model then
-        if tostring(model:GetAttribute("Dead")) == "true" then return true end
+        local hum = model:FindFirstChildOfClass("Humanoid")
+        if hum and hum.Health <= 0 then
+            return true
+        end
+
+        local mDead = model:GetAttribute("Dead") or model:GetAttribute("IsDead")
+        if mDead == true or tostring(mDead) == "true" then
+            return true
+        end
+
         local hp = tonumber(model:GetAttribute("Health"))
-        if hp and hp <= 0 then return true end
+        if hp and hp <= 0 then
+            return true
+        end
     end
+
     if player then
-        if tostring(player:GetAttribute("Dead")) == "true" then return true end
+        local pDead = player:GetAttribute("Dead") or player:GetAttribute("IsDead")
+        if pDead == true or tostring(pDead) == "true" then
+            return true
+        end
+
         local hp = tonumber(player:GetAttribute("Health"))
-        if hp and hp <= 0 then return true end
+        if hp and hp <= 0 then
+            return true
+        end
     end
+
     return false
 end
 
@@ -1412,4 +1431,4 @@ end
 env.CybrionUnload = env.BWXUnload
 env.BloxStrikeUnload = env.BWXUnload
 
-print("[BWX] Suite v3.7.1 Loaded. Zero-GC No Recoil & No Spread Engine.")
+print("[BWX] Suite v3.7.2 Loaded. Zero-GC No Recoil & No Spread Engine.")

@@ -1,20 +1,21 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v3.9.2 Native Property No Recoil)
+    ⚡ BWX // Bloxstrike Utility Suite (v3.10 Safe CameraHook No Recoil)
     Optimized for Xeno & Modern Executors
     Target: Roblox Bloxstrike (7633926880)
 
-    Architectural Updates in v3.9.2:
-      FIX: Native Property No Recoil:
-        - Removed unstable mousemoverel compensation.
-        - Added `ApplyNoRecoil()` to forcefully overwrite weapon "Recoil", "CameraRecoil", "WeaponKick", and "Kickback" properties to 0.
-        - Crosshair and bullet trajectory now remain stable during spray.
+    Architectural Updates in v3.10:
+      FIX: Native Property No Recoil failed (game uses internal modules).
+        - Implemented Safe CameraController Hook.
+        - Hooks `weaponKick` and `getWeaponKickRotation` to strip rotation.
+        - Preserves the return type (CFrame/Vector3) so replication state machine never breaks.
+        - Allows you to buy weapons and shoot normally without recoil.
       PRESERVED CORE ARCHITECTURE:
-        - Non-invasive property/attribute overwrite No Spread (zero hooks/replication safe).
+        - Non-invasive property/attribute overwrite No Spread.
         - LMB Aimlock (MouseButton1) with smooth 0.22 tracking and LockCenter enforcement.
-        - Position Caching ESP with 1-second grace period for occluded/streamed models behind walls.
+        - Position Caching ESP with 1-second grace period.
         - Head-only Hitbox Expander with safe memory restoration.
-        - Multi-tier team normalization (TeamId, TeamColor, Role, TeamName, and FFA check).
-        - Robust dual-target dead check (IsModelDead) with full player fallback.
+        - Multi-tier team normalization and FFA check.
+        - Robust dual-target dead check (IsModelDead).
 ]]
 
 if not game:IsLoaded() then
@@ -42,8 +43,8 @@ if env.BloxStrikeUnload then pcall(env.BloxStrikeUnload) end
 local Config = {
     Combat = {
         AimLock = true,
-        AimLockStrength = 0.22, -- Smooth, sticky tracking (0.15 - 0.30 sweet spot)
-        SilentAim = true, -- True Silent Aim via Head Hitbox Expander
+        AimLockStrength = 0.22,
+        SilentAim = true,
         HitboxSize = 8,
         HitPart = "Head",
         FOV = 130,
@@ -76,7 +77,7 @@ local Config = {
         Bhop = true
     },
     UI = {
-        MenuOpen = false -- Starts CLOSED so it never absorbs mouse clicks
+        MenuOpen = false
     }
 }
 
@@ -85,23 +86,24 @@ local Runtime = {
     Target = nil,
     TargetPart = nil,
     DrawingPool = {},
-    OriginalSizes = {}, -- For safe Hitbox Expander restoration
-    CachedPositions = {}, -- Task 2: Position Caching for StreamingEnabled / Occlusion
+    OriginalSizes = {},
+    CachedPositions = {},
     FOVDrawing = nil,
     C4Drawing = nil,
     NoticeDrawing = nil,
     NoticeStart = os.clock(),
     Connections = {},
+    Hooks = {},
+    RecoilHookInstalled = false,
+    LastHookCheck = 0,
     LastC4Check = 0,
     CachedC4 = nil
 }
 
--- Wallcheck Raycast Params (Allocated once, reused globally)
 local WallParams = RaycastParams.new()
 WallParams.FilterType = Enum.RaycastFilterType.Exclude
 WallParams.IgnoreWater = true
 
--- FOV Circle Drawing
 Runtime.FOVDrawing = Drawing.new("Circle")
 Runtime.FOVDrawing.Thickness = 1.5
 Runtime.FOVDrawing.NumSides = 48
@@ -111,7 +113,6 @@ Runtime.FOVDrawing.Radius = Config.Combat.FOV
 Runtime.FOVDrawing.Color = Config.Combat.FOVColor
 Runtime.FOVDrawing.Visible = Config.Combat.ShowFOV
 
--- C4 Objective Text
 Runtime.C4Drawing = Drawing.new("Text")
 Runtime.C4Drawing.Size = 13
 Runtime.C4Drawing.Center = true
@@ -119,7 +120,6 @@ Runtime.C4Drawing.Outline = true
 Runtime.C4Drawing.Color = Config.Visuals.C4Color
 Runtime.C4Drawing.Visible = false
 
--- Startup Banner Overlay (Fades out after 5 seconds)
 Runtime.NoticeDrawing = Drawing.new("Text")
 Runtime.NoticeDrawing.Size = 14
 Runtime.NoticeDrawing.Center = true
@@ -130,90 +130,73 @@ Runtime.NoticeDrawing.Text = "⚡ BWX BLOXSTRIKE READY [Tekan K / Insert untuk M
 Runtime.NoticeDrawing.Visible = true
 
 -- =========================================================================
--- NON-INVASIVE WEAPON MODS (Property & Attribute Overwrite)
+-- SAFE HOOKS (No Recoil & No Spread)
 -- =========================================================================
+local function SetupNoRecoil()
+    if Runtime.RecoilHookInstalled then return end
+    local controllers = ReplicatedStorage:FindFirstChild("Controllers")
+    local camModuleScript = controllers and controllers:FindFirstChild("CameraController")
+    
+    if camModuleScript and camModuleScript:IsA("ModuleScript") then
+        local ok, camModule = pcall(require, camModuleScript)
+        if ok and type(camModule) == "table" then
+            -- 1. Hook weaponKick
+            if type(camModule.weaponKick) == "function" and not Runtime.Hooks["weaponKick"] then
+                local oldKick = camModule.weaponKick
+                camModule.weaponKick = function(...)
+                    local result = oldKick(...)
+                    if Config.WeaponMods.NoRecoil and result then
+                        if typeof(result) == "CFrame" then
+                            return CFrame.new(result.Position) -- Strip rotation, keep position
+                        elseif typeof(result) == "Vector3" then
+                            return Vector3.zero
+                        end
+                    end
+                    return result
+                end
+                Runtime.Hooks["weaponKick"] = function() camModule.weaponKick = oldKick end
+            end
+
+            -- 2. Hook getWeaponKickRotation
+            if type(camModule.getWeaponKickRotation) == "function" and not Runtime.Hooks["getWeaponKickRotation"] then
+                local oldRot = camModule.getWeaponKickRotation
+                camModule.getWeaponKickRotation = function(...)
+                    local result = oldRot(...)
+                    if Config.WeaponMods.NoRecoil and result then
+                        if typeof(result) == "CFrame" then
+                            return CFrame.new()
+                        elseif typeof(result) == "Vector3" then
+                            return Vector3.zero
+                        end
+                    end
+                    return result
+                end
+                Runtime.Hooks["getWeaponKickRotation"] = function() camModule.getWeaponKickRotation = oldRot end
+            end
+
+            Runtime.RecoilHookInstalled = true
+        end
+    end
+end
+pcall(SetupNoRecoil)
+
 local function ApplyNoSpread()
     if not Config.WeaponMods.NoSpread then return end
-
     local myChar = (Workspace:FindFirstChild("Characters") and Workspace.Characters:FindFirstChild(LocalPlayer.Name)) or LocalPlayer.Character
     if myChar then
         local tool = myChar:FindFirstChildOfClass("Tool")
         if tool then
             for _, attr in ipairs({"Spread", "BaseSpread", "MinSpread", "MaxSpread", "CurrentSpread", "Inaccuracy", "WeaponSpread"}) do
-                if tool:GetAttribute(attr) ~= nil and tool:GetAttribute(attr) ~= 0 then
-                    pcall(function() tool:SetAttribute(attr, 0) end)
-                end
+                if tool:GetAttribute(attr) ~= nil and tool:GetAttribute(attr) ~= 0 then pcall(function() tool:SetAttribute(attr, 0) end) end
             end
             for _, name in ipairs({"Spread", "BaseSpread", "MinSpread", "MaxSpread", "Inaccuracy"}) do
                 local val = tool:FindFirstChild(name, true)
-                if val and (val:IsA("NumberValue") or val:IsA("IntValue")) and val.Value ~= 0 then
-                    pcall(function() val.Value = 0 end)
-                end
+                if val and (val:IsA("NumberValue") or val:IsA("IntValue")) and val.Value ~= 0 then pcall(function() val.Value = 0 end) end
             end
         end
         for _, attr in ipairs({"Spread", "BaseSpread", "MinSpread", "MaxSpread", "Inaccuracy"}) do
-            if myChar:GetAttribute(attr) ~= nil and myChar:GetAttribute(attr) ~= 0 then
-                pcall(function() myChar:SetAttribute(attr, 0) end)
-            end
-            if LocalPlayer:GetAttribute(attr) ~= nil and LocalPlayer:GetAttribute(attr) ~= 0 then
-                pcall(function() LocalPlayer:SetAttribute(attr, 0) end)
-            end
-        end
-    end
-
-    local weaponsFolder = ReplicatedStorage:FindFirstChild("Weapons") or ReplicatedStorage:FindFirstChild("WeaponConfigs") or ReplicatedStorage:FindFirstChild("Items")
-    if weaponsFolder then
-        for _, item in ipairs(weaponsFolder:GetChildren()) do
-            for _, attr in ipairs({"Spread", "BaseSpread", "MinSpread", "MaxSpread"}) do
-                if item:GetAttribute(attr) ~= nil and item:GetAttribute(attr) ~= 0 then
-                    pcall(function() item:SetAttribute(attr, 0) end)
-                end
-            end
-        end
-    end
-end
-
-local function ApplyNoRecoil()
-    if not Config.WeaponMods.NoRecoil then return end
-
-    local myChar = (Workspace:FindFirstChild("Characters") and Workspace.Characters:FindFirstChild(LocalPlayer.Name)) or LocalPlayer.Character
-    if myChar then
-        local tool = myChar:FindFirstChildOfClass("Tool")
-        if tool then
-            -- 1. Overwrite Tool Attributes
-            for _, attr in ipairs({"Recoil", "CameraRecoil", "WeaponKick", "Kickback", "VerticalRecoil", "RecoilPitch", "RecoilYaw"}) do
-                if tool:GetAttribute(attr) ~= nil and tool:GetAttribute(attr) ~= 0 then
-                    pcall(function() tool:SetAttribute(attr, 0) end)
-                end
-            end
-            -- 2. Overwrite Tool Child Values
-            for _, name in ipairs({"Recoil", "CameraRecoil", "WeaponKick", "Kickback", "VerticalRecoil", "RecoilPitch", "RecoilYaw"}) do
-                local val = tool:FindFirstChild(name, true)
-                if val and (val:IsA("NumberValue") or val:IsA("IntValue")) and val.Value ~= 0 then
-                    pcall(function() val.Value = 0 end)
-                end
-            end
-        end
-        -- 3. Overwrite Character / Player Recoil Attributes
-        for _, attr in ipairs({"Recoil", "CameraRecoil", "WeaponKick", "Kickback", "VerticalRecoil"}) do
-            if myChar:GetAttribute(attr) ~= nil and myChar:GetAttribute(attr) ~= 0 then
-                pcall(function() myChar:SetAttribute(attr, 0) end)
-            end
-            if LocalPlayer:GetAttribute(attr) ~= nil and LocalPlayer:GetAttribute(attr) ~= 0 then
-                pcall(function() LocalPlayer:SetAttribute(attr, 0) end)
-            end
-        end
-    end
-
-    -- 4. Overwrite ReplicatedStorage Weapon definitions if present
-    local weaponsFolder = ReplicatedStorage:FindFirstChild("Weapons") or ReplicatedStorage:FindFirstChild("WeaponConfigs") or ReplicatedStorage:FindFirstChild("Items")
-    if weaponsFolder then
-        for _, item in ipairs(weaponsFolder:GetChildren()) do
-            for _, attr in ipairs({"Recoil", "CameraRecoil", "WeaponKick", "Kickback", "VerticalRecoil"}) do
-                if item:GetAttribute(attr) ~= nil and item:GetAttribute(attr) ~= 0 then
-                    pcall(function() item:SetAttribute(attr, 0) end)
-                end
-            end
+            if myChar:GetAttribute(attr) ~= nil and myChar:GetAttribute(attr) ~= 0 then pcall(function() myChar:SetAttribute(attr, 0) end) end
+            if LocalPlayer:GetAttribute(attr) ~= nil and LocalPlayer:GetAttribute(attr) ~= 0 then pcall(function() LocalPlayer:SetAttribute(attr, 0) end) end
         end
     end
 end
@@ -222,28 +205,20 @@ end
 local function NormalizeTeam(val)
     if val == nil then return nil end
     local s = tostring(val):lower()
-    if s == "1" or s == "ct" or s:find("counter") or s:find("blue") then
-        return "CT"
-    elseif s == "2" or s == "t" or s:find("terror") or s:find("red") or s:find("orange") then
-        return "T"
-    end
+    if s == "1" or s == "ct" or s:find("counter") or s:find("blue") then return "CT"
+    elseif s == "2" or s == "t" or s:find("terror") or s:find("red") or s:find("orange") then return "T" end
     return s
 end
 
 local function GetEntityTeam(model, player)
     if model then
         local mTeam = model:GetAttribute("Team") or model:GetAttribute("TeamId") or model:GetAttribute("TeamName") or model:GetAttribute("Role") or model:GetAttribute("TeamColor")
-        local norm = NormalizeTeam(mTeam)
-        if norm then return norm end
+        local norm = NormalizeTeam(mTeam); if norm then return norm end
     end
     if player then
-        if player.Team then
-            local norm = NormalizeTeam(player.Team.Name)
-            if norm then return norm end
-        end
+        if player.Team then local norm = NormalizeTeam(player.Team.Name); if norm then return norm end end
         local pTeam = player:GetAttribute("Team") or player:GetAttribute("TeamId") or player:GetAttribute("TeamName") or player:GetAttribute("Role") or player:GetAttribute("TeamColor")
-        local norm = NormalizeTeam(pTeam)
-        if norm then return norm end
+        local norm = NormalizeTeam(pTeam); if norm then return norm end
         if player.TeamColor then
             local tc = tostring(player.TeamColor):lower()
             if tc:find("blue") or tc:find("cobalt") or tc:find("cyan") then return "CT" end
@@ -253,10 +228,8 @@ local function GetEntityTeam(model, player)
     if model then
         local look = model:GetAttribute("CharacterName")
         if look then
-            local ctLook = Workspace:GetAttribute("CTCharacter")
-            local tLook = Workspace:GetAttribute("TCharacter")
-            if ctLook and look == ctLook then return "CT" end
-            if tLook and look == tLook then return "T" end
+            local ctLook = Workspace:GetAttribute("CTCharacter"); local tLook = Workspace:GetAttribute("TCharacter")
+            if ctLook and look == ctLook then return "CT" end; if tLook and look == tLook then return "T" end
             local lookLower = tostring(look):lower()
             if lookLower:find("ct") or lookLower:find("counter") or lookLower:find("swat") or lookLower:find("sas") or lookLower:find("seal") or lookLower:find("fbi") or lookLower:find("gsg") then return "CT" end
             if lookLower:find("terror") or lookLower:find("phoenix") or lookLower:find("anarchist") or lookLower:find("balkan") or lookLower:find("leet") or lookLower:find("separatist") or lookLower:find("pirate") then return "T" end
@@ -272,21 +245,15 @@ local function IsTeammate(model, player)
     if gm:find("deathmatch") or gm:find("ffa") then return false end
     local myChar = (Workspace:FindFirstChild("Characters") and Workspace.Characters:FindFirstChild(LocalPlayer.Name)) or LocalPlayer.Character
     if not myChar then return false end
-    local myTeam = GetEntityTeam(myChar, LocalPlayer)
-    if not myTeam then return false end
-    local targetTeam = GetEntityTeam(model, player)
-    if not targetTeam then return false end
+    local myTeam = GetEntityTeam(myChar, LocalPlayer); if not myTeam then return false end
+    local targetTeam = GetEntityTeam(model, player); if not targetTeam then return false end
     return myTeam == targetTeam
 end
 
 local function GetOrCreateDrawing(id)
     local draw = Runtime.DrawingPool[id]
     if not draw then
-        draw = {
-            BoxOutline = Drawing.new("Square"), Box = Drawing.new("Square"),
-            HealthOutline = Drawing.new("Line"), Health = Drawing.new("Line"),
-            Name = Drawing.new("Text"), Distance = Drawing.new("Text"), Tracer = Drawing.new("Line")
-        }
+        draw = { BoxOutline = Drawing.new("Square"), Box = Drawing.new("Square"), HealthOutline = Drawing.new("Line"), Health = Drawing.new("Line"), Name = Drawing.new("Text"), Distance = Drawing.new("Text"), Tracer = Drawing.new("Line") }
         draw.BoxOutline.Thickness = 3; draw.BoxOutline.Filled = false; draw.BoxOutline.Color = Color3.new(0, 0, 0); draw.BoxOutline.Transparency = 0.8; draw.BoxOutline.Visible = false
         draw.Box.Thickness = 1; draw.Box.Filled = false; draw.Box.Transparency = 1; draw.Box.Visible = false
         draw.HealthOutline.Thickness = 3; draw.HealthOutline.Color = Color3.new(0, 0, 0); draw.HealthOutline.Visible = false
@@ -310,9 +277,7 @@ local function HideDrawing(draw)
 end
 
 local function DestroyDrawing(draw)
-    for _, item in pairs(draw) do
-        pcall(function() item.Visible = false; item:Remove() end)
-    end
+    for _, item in pairs(draw) do pcall(function() item.Visible = false; item:Remove() end) end
 end
 
 local function LocateC4()
@@ -334,14 +299,12 @@ local function IsModelDead(model, player)
         if hum and hum.Health <= 0 then return true end
         local mDead = model:GetAttribute("Dead") or model:GetAttribute("IsDead")
         if mDead == true or tostring(mDead) == "true" then return true end
-        local hp = tonumber(model:GetAttribute("Health"))
-        if hp and hp <= 0 then return true end
+        local hp = tonumber(model:GetAttribute("Health")); if hp and hp <= 0 then return true end
     end
     if player then
         local pDead = player:GetAttribute("Dead") or player:GetAttribute("IsDead")
         if pDead == true or tostring(pDead) == "true" then return true end
-        local hp = tonumber(player:GetAttribute("Health"))
-        if hp and hp <= 0 then return true end
+        local hp = tonumber(player:GetAttribute("Health")); if hp and hp <= 0 then return true end
     end
     return false
 end
@@ -359,9 +322,7 @@ end
 
 local function ResetAllHitboxes()
     for head, data in pairs(Runtime.OriginalSizes) do
-        if head and head.Parent then
-            pcall(function() head.Size = data.Size; head.Transparency = data.Transparency; head.CanCollide = data.CanCollide end)
-        end
+        if head and head.Parent then pcall(function() head.Size = data.Size; head.Transparency = data.Transparency; head.CanCollide = data.CanCollide end) end
     end
     table.clear(Runtime.OriginalSizes)
 end
@@ -370,9 +331,7 @@ local function SetupAntiFlash()
     local function MuteFlash(child)
         if Config.WeaponMods.AntiFlash and child:IsA("BlurEffect") and child.Name:lower():find("flash") then
             child.Size = 0
-            child:GetPropertyChangedSignal("Size"):Connect(function()
-                if Config.WeaponMods.AntiFlash and child.Size > 0 then child.Size = 0 end
-            end)
+            child:GetPropertyChangedSignal("Size"):Connect(function() if Config.WeaponMods.AntiFlash and child.Size > 0 then child.Size = 0 end end)
         end
     end
     for _, obj in ipairs(Lighting:GetChildren()) do MuteFlash(obj) end
@@ -399,9 +358,13 @@ end
 table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
     GuardMatchUI()
     ApplyNoSpread()
-    ApplyNoRecoil()
 
     local now = os.clock()
+    if now - Runtime.LastHookCheck > 2.0 then
+        Runtime.LastHookCheck = now
+        if not Runtime.RecoilHookInstalled then pcall(SetupNoRecoil) end
+    end
+
     if Runtime.NoticeDrawing and Runtime.NoticeDrawing.Visible then
         if now - Runtime.NoticeStart > 5.0 then Runtime.NoticeDrawing.Visible = false end
     end
@@ -443,7 +406,6 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
                         local displayName = (player and player.DisplayName) or model.Name
 
                         Runtime.CachedPositions[id] = { Position = rootPos, LastSeen = now, Team = isTeam, DisplayName = displayName, Player = player, Health = hp, MaxHealth = maxHp }
-
                         if Config.Combat.SilentAim and not isTeam then ApplyHitbox(model) end
 
                         local draw = GetOrCreateDrawing(id)
@@ -564,8 +526,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
 
     if bestHitPart and Config.Combat.VisibleCheck then
         local myChar = chars and chars:FindFirstChild(LocalPlayer.Name)
-        local filterList = {Camera}
-        if myChar then table.insert(filterList, myChar) end
+        local filterList = {Camera}; if myChar then table.insert(filterList, myChar) end
         WallParams.FilterDescendantsInstances = filterList
         local dir = bestHitPart.Position - camPos
         local hit = Workspace:Raycast(camPos, dir, WallParams)
@@ -716,7 +677,7 @@ local function BuildUI()
     CreateToggle(visualsPage, "C4 Bomb Tracker", Config.Visuals.C4Tracker, function(v) Config.Visuals.C4Tracker = v end)
     CreateSlider(visualsPage, "Max ESP Distance", 500, 8000, Config.Visuals.MaxDistance, "m", function(v) Config.Visuals.MaxDistance = v end)
     local modsPage = pages["Gun Mods"]
-    CreateToggle(modsPage, "No Recoil (Property Overwrite)", Config.WeaponMods.NoRecoil, function(v) Config.WeaponMods.NoRecoil = v end)
+    CreateToggle(modsPage, "No Recoil (Safe Hook)", Config.WeaponMods.NoRecoil, function(v) Config.WeaponMods.NoRecoil = v end)
     CreateToggle(modsPage, "No Spread (Attribute Overwrite)", Config.WeaponMods.NoSpread, function(v) Config.WeaponMods.NoSpread = v end)
     CreateToggle(modsPage, "Anti-Flashbang (Instant Blind Wipe)", Config.WeaponMods.AntiFlash, function(v) Config.WeaponMods.AntiFlash = v end)
     local movePage = pages["Movement"]
@@ -737,6 +698,8 @@ env.BWXUnload = function()
     ResetAllHitboxes(); table.clear(Runtime.CachedPositions)
     for _, conn in ipairs(Runtime.Connections) do pcall(function() conn:Disconnect() end) end
     table.clear(Runtime.Connections)
+    for _, unhook in pairs(Runtime.Hooks) do pcall(unhook) end
+    table.clear(Runtime.Hooks)
     if Runtime.FOVDrawing then pcall(function() Runtime.FOVDrawing:Remove() end) end
     if Runtime.C4Drawing then pcall(function() Runtime.C4Drawing:Remove() end) end
     if Runtime.NoticeDrawing then pcall(function() Runtime.NoticeDrawing:Remove() end) end
@@ -748,4 +711,4 @@ end
 env.CybrionUnload = env.BWXUnload
 env.BloxStrikeUnload = env.BWXUnload
 
-print("[BWX] Suite v3.9.2 Loaded. Native Property No Recoil.")
+print("[BWX] Suite v3.10 Loaded. Safe CameraHook No Recoil.")

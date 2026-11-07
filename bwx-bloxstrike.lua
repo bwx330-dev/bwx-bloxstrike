@@ -1,19 +1,15 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v3.11.2 UI Version Tag)
+    ⚡ BWX // Bloxstrike Utility Suite (v3.12 Clean & Stable Edition)
     Optimized for Xeno & Modern Executors
     Target: Roblox Bloxstrike (7633926880)
 
-    Architectural Updates in v3.11.2:
-      UI: Added Version Tag to Header and Startup Banner.
-      PRESERVED CORE ARCHITECTURE:
-        - Hookless Safe Edition (Zero replication stalls).
-        - Non-invasive property/attribute overwrite No Spread & No Recoil.
-        - LMB Aimlock (MouseButton1) with smooth 0.22 tracking.
-        - Position Caching ESP with 1-second grace period.
-        - Head-only Hitbox Expander with safe memory restoration.
-        - Multi-tier team normalization and FFA check.
-        - Player Radar (Minimap).
-        - Auto Reload (Disabled by default).
+    Architectural Updates in v3.12:
+      REMOVED: Player Radar (useless due to StreamingEnabled occlusion).
+      FIXED: ESP now hides instantly upon death (purges position cache).
+      HONEST NOTE: No Recoil/No Spread/AutoReload are heavily restricted by 
+      server-side validation. They are included but may not function if the 
+      game does not use client-readable attributes.
+      PRESERVED: Zero replication stalls (buy/shoot works). LMB Aimlock. ESP.
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -23,7 +19,6 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local Lighting = game:GetService("Lighting")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 
@@ -59,16 +54,13 @@ local Config = {
         DistanceESP = true,
         MaxDistance = 5000,
         C4Tracker = true,
-        C4Color = Color3.fromRGB(250, 195, 60),
-        Radar = true,
-        RadarSize = 120,
-        RadarZoom = 0.5
+        C4Color = Color3.fromRGB(250, 195, 60)
     },
     WeaponMods = {
-        NoRecoil = true,
-        NoSpread = true,
+        NoRecoil = false, -- Disabled by default (server authoritative)
+        NoSpread = false, -- Disabled by default
         AntiFlash = true,
-        AutoReload = false -- Disabled by default
+        AutoReload = false
     },
     Movement = {
         Bhop = true
@@ -90,10 +82,7 @@ local Runtime = {
     Connections = {},
     LastC4Check = 0,
     CachedC4 = nil,
-    LastReloadTime = 0,
-    RadarBg = nil,
-    RadarBorder = nil,
-    RadarBlips = {}
+    LastReloadTime = 0
 }
 
 local WallParams = RaycastParams.new()
@@ -105,14 +94,6 @@ Runtime.FOVDrawing.Thickness = 1.5; Runtime.FOVDrawing.NumSides = 48; Runtime.FO
 Runtime.FOVDrawing.Transparency = 0.75; Runtime.FOVDrawing.Radius = Config.Combat.FOV
 Runtime.FOVDrawing.Color = Config.Combat.FOVColor; Runtime.FOVDrawing.Visible = Config.Combat.ShowFOV
 
-Runtime.RadarBg = Drawing.new("Circle")
-Runtime.RadarBg.Filled = true; Runtime.RadarBg.Color = Color3.fromRGB(15, 17, 19)
-Runtime.RadarBg.Transparency = 0.6; Runtime.RadarBg.NumSides = 32; Runtime.RadarBg.Visible = false
-
-Runtime.RadarBorder = Drawing.new("Circle")
-Runtime.RadarBorder.Filled = false; Runtime.RadarBorder.Color = Color3.fromRGB(50, 230, 150)
-Runtime.RadarBorder.Thickness = 1.5; Runtime.RadarBorder.NumSides = 32; Runtime.RadarBorder.Visible = false
-
 Runtime.C4Drawing = Drawing.new("Text")
 Runtime.C4Drawing.Size = 13; Runtime.C4Drawing.Center = true; Runtime.C4Drawing.Outline = true
 Runtime.C4Drawing.Color = Config.Visuals.C4Color; Runtime.C4Drawing.Visible = false
@@ -121,11 +102,11 @@ Runtime.NoticeDrawing = Drawing.new("Text")
 Runtime.NoticeDrawing.Size = 14; Runtime.NoticeDrawing.Center = true; Runtime.NoticeDrawing.Outline = true
 Runtime.NoticeDrawing.Color = Color3.fromRGB(50, 230, 150)
 Runtime.NoticeDrawing.Position = Vector2.new(Camera.ViewportSize.X / 2, 40)
-Runtime.NoticeDrawing.Text = "⚡ BWX BLOXSTRIKE v3.11.2 READY [Tekan K / Insert untuk Menu]"
+Runtime.NoticeDrawing.Text = "⚡ BWX BLOXSTRIKE v3.12 READY [Tekan K / Insert untuk Menu]"
 Runtime.NoticeDrawing.Visible = true
 
 -- =========================================================================
--- NATIVE PROPERTY OVERWRITE (No Hooks)
+-- ATTRIBUTE OVERWRITES (Honest attempt, but server may ignore)
 -- =========================================================================
 local function ApplyNoSpread()
     if not Config.WeaponMods.NoSpread then return end
@@ -169,9 +150,11 @@ local function ApplyAutoReload()
     if not myChar then return end
     local tool = myChar:FindFirstChildOfClass("Tool")
     if not tool then return end
+    
     local ammo = tool:GetAttribute("Ammo") or tool:GetAttribute("CurrentAmmo") or tool:GetAttribute("Mag")
-    local ammoVal = tool:FindFirstChild("Ammo") or tool:FindFirstChild("CurrentAmmo") or tool:FindFirstChild("Mag")
+    local ammoVal = tool:FindFirstChild("Ammo") or tool:FindFirstChild("CurrentAmmo") or tool:FindFirstChild("Mag") or tool:FindFirstChild("Magazine") or tool:FindFirstChild("Clip")
     if ammoVal and ammoVal:IsA("ValueBase") then ammo = ammoVal.Value end
+    
     if tonumber(ammo) == 0 then
         Runtime.LastReloadTime = now
         VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
@@ -354,15 +337,6 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         Runtime.FOVDrawing.Position = center; Runtime.FOVDrawing.Radius = fov; Runtime.FOVDrawing.Color = Config.Combat.FOVColor; Runtime.FOVDrawing.Visible = Config.Combat.ShowFOV
     end
 
-    local radarCenter = Vector2.new(100, 100 + 36)
-    local radarRadius = Config.Visuals.RadarSize / 2
-    if Config.Visuals.Radar then
-        Runtime.RadarBg.Position = radarCenter; Runtime.RadarBg.Radius = radarRadius; Runtime.RadarBg.Visible = true
-        Runtime.RadarBorder.Position = radarCenter; Runtime.RadarBorder.Radius = radarRadius; Runtime.RadarBorder.Visible = true
-    else
-        Runtime.RadarBg.Visible = false; Runtime.RadarBorder.Visible = false
-    end
-
     if not Config.Combat.SilentAim and next(Runtime.OriginalSizes) then ResetAllHitboxes() end
 
     local activeIds = {}
@@ -376,6 +350,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
             if model:IsA("Model") and model.Name ~= LocalPlayer.Name then
                 local player = Players:GetPlayerFromCharacter(model)
                 local id = model.Name
+                
                 if not IsModelDead(model, player) then
                     local root = model:FindFirstChild("HumanoidRootPart") or model:FindFirstChild("Torso")
                     local head = model:FindFirstChild("Head")
@@ -390,24 +365,6 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
 
                         Runtime.CachedPositions[id] = { Position = rootPos, LastSeen = now, Team = isTeam, DisplayName = displayName, Player = player, Health = hp, MaxHealth = maxHp }
                         if Config.Combat.SilentAim and not isTeam then ApplyHitbox(model) end
-
-                        if Config.Visuals.Radar and not isTeam and dist <= maxDist then
-                            local relative = Camera.CFrame:PointToObjectSpace(rootPos)
-                            local rx = radarCenter.X + (relative.X * Config.Visuals.RadarZoom)
-                            local ry = radarCenter.Y + (relative.Z * Config.Visuals.RadarZoom)
-                            local distToCenter = (Vector2.new(rx, ry) - radarCenter).Magnitude
-                            if distToCenter > radarRadius then
-                                local dir = (Vector2.new(rx, ry) - radarCenter).Unit
-                                rx = radarCenter.X + dir.X * radarRadius
-                                ry = radarCenter.Y + dir.Y * radarRadius
-                            end
-                            if not Runtime.RadarBlips[id] then
-                                Runtime.RadarBlips[id] = Drawing.new("Circle")
-                                Runtime.RadarBlips[id].Radius = 3; Runtime.RadarBlips[id].Filled = true; Runtime.RadarBlips[id].NumSides = 8
-                            end
-                            local blip = Runtime.RadarBlips[id]
-                            blip.Position = Vector2.new(rx, ry); blip.Color = Config.Visuals.EnemyColor; blip.Visible = true
-                        elseif Runtime.RadarBlips[id] then Runtime.RadarBlips[id].Visible = false end
 
                         local draw = GetOrCreateDrawing(id)
                         if visualsOn and not (Config.Visuals.TeamCheck and isTeam) and dist <= maxDist then
@@ -452,19 +409,22 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
                             end
                         end
                     end
+                else
+                    -- INSTANT PURGE ON DEATH
+                    Runtime.CachedPositions[id] = nil
+                    local draw = Runtime.DrawingPool[id]
+                    if draw then HideDrawing(draw) end
                 end
             end
         end
     end
 
-    for id, blip in pairs(Runtime.RadarBlips) do
-        if not activeIds[id] then blip:Remove(); Runtime.RadarBlips[id] = nil end
-    end
-
     if visualsOn then
         for id, cached in pairs(Runtime.CachedPositions) do
             if not activeIds[id] then
-                if cached.Player and IsModelDead(nil, cached.Player) then Runtime.CachedPositions[id] = nil
+                if cached.Player and IsModelDead(nil, cached.Player) then 
+                    Runtime.CachedPositions[id] = nil
+                    local d = Runtime.DrawingPool[id]; if d then HideDrawing(d) end
                 else
                     local elapsed = now - cached.LastSeen
                     if elapsed <= 1.0 then
@@ -511,6 +471,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
                         end
                     else
                         Runtime.CachedPositions[id] = nil
+                        local d = Runtime.DrawingPool[id]; if d then HideDrawing(d) end
                     end
                 end
             end
@@ -596,7 +557,7 @@ local function BuildUI()
     local headerBottom = Instance.new("Frame"); headerBottom.Size = UDim2.new(1, 0, 0, 8); headerBottom.Position = UDim2.new(0, 0, 1, -8); headerBottom.BackgroundColor3 = Theme.Header; headerBottom.BorderSizePixel = 0; headerBottom.Parent = header
     
     local title = Instance.new("TextLabel")
-    title.Text = "⚡ BWX // BLOXSTRIKE (v3.11.2)"
+    title.Text = "⚡ BWX // BLOXSTRIKE (v3.12)"
     title.Font = Enum.Font.GothamBold; title.TextSize = 14; title.TextColor3 = Theme.Accent
     title.TextXAlignment = Enum.TextXAlignment.Left; title.BackgroundTransparency = 1
     title.Position = UDim2.new(0, 14, 0, 0); title.Size = UDim2.new(0.6, 0, 1, 0); title.Parent = header
@@ -683,8 +644,6 @@ local function BuildUI()
     CreateToggle(visualsPage, "Snaplines / Tracers", Config.Visuals.Tracers, function(v) Config.Visuals.Tracers = v end)
     CreateToggle(visualsPage, "C4 Bomb Tracker", Config.Visuals.C4Tracker, function(v) Config.Visuals.C4Tracker = v end)
     CreateSlider(visualsPage, "Max ESP Distance", 500, 8000, Config.Visuals.MaxDistance, "m", function(v) Config.Visuals.MaxDistance = v end)
-    CreateToggle(visualsPage, "Player Radar (Minimap)", Config.Visuals.Radar, function(v) Config.Visuals.Radar = v end)
-    CreateSlider(visualsPage, "Radar Zoom", 1, 10, math.floor(Config.Visuals.RadarZoom * 10), "x", function(v) Config.Visuals.RadarZoom = v / 10 end)
 
     local modsPage = pages["Gun Mods"]
     CreateToggle(modsPage, "No Recoil (Property)", Config.WeaponMods.NoRecoil, function(v) Config.WeaponMods.NoRecoil = v end)
@@ -714,10 +673,6 @@ env.BWXUnload = function()
     if Runtime.FOVDrawing then pcall(function() Runtime.FOVDrawing:Remove() end) end
     if Runtime.C4Drawing then pcall(function() Runtime.C4Drawing:Remove() end) end
     if Runtime.NoticeDrawing then pcall(function() Runtime.NoticeDrawing:Remove() end) end
-    if Runtime.RadarBg then pcall(function() Runtime.RadarBg:Remove() end) end
-    if Runtime.RadarBorder then pcall(function() Runtime.RadarBorder:Remove() end) end
-    for id, blip in pairs(Runtime.RadarBlips) do pcall(function() blip:Remove() end) end
-    table.clear(Runtime.RadarBlips)
     for _, draw in pairs(Runtime.DrawingPool) do DestroyDrawing(draw) end
     table.clear(Runtime.DrawingPool)
     if GuiInstance then pcall(function() GuiInstance:Destroy() end) end
@@ -725,4 +680,4 @@ env.BWXUnload = function()
 end
 env.BWXUnload = env.BWXUnload
 
-print("[BWX] Suite v3.11.2 Loaded. Hookless Safe Edition.")
+print("[BWX] Suite v3.12 Loaded. Clean & Stable Edition.")

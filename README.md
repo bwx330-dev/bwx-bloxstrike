@@ -1,75 +1,68 @@
-<div align="center">
+![Version](https://img.shields.io/badge/version-3.11-green)
 
-# ⚡ BWX // Bloxstrike Utility Suite
+# ⚡ BWX // Bloxstrike Utility Suite (v3.11)
 
-**High-Performance Client Automation & Combat Engine for Roblox Bloxstrike**
+A high-performance, non-invasive utility suite designed for **Bloxstrike** (Roblox). 
+Optimized specifically for **Xeno** and modern executors. Built with a focus on engine stability, zero replication stalls, and frame-perfect rendering.
 
-[![Luau](https://img.shields.io/badge/Language-Luau-00A2FF?style=for-the-badge&logo=lua)](https://luau-lang.org/)
-[![Game](https://img.shields.io/badge/Roblox-Bloxstrike-E02424?style=for-the-badge&logo=roblox)](https://www.roblox.com/games/7633926880)
-[![Status](https://img.shields.io/badge/Status-Undetected%20%2F%20Operational-50E696?style=for-the-badge)]()
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%2F%20Xeno-18181B?style=for-the-badge)]()
+## 🚀 Features
 
-<br/>
+### Combat
+*   **LMB Aimlock:** Smooth, magnetized target tracking activated by holding Left Click (LMB). Only locks onto targets within the FOV radius.
+*   **Silent Aim (Hitbox Expander):** Dynamically expands the Head hitbox for magnetic bullet registration. Includes safe memory restoration when disabled.
+*   **FOV Customization:** Adjustable FOV radius and color.
+*   **Wallcheck:** Optional visibility check to only lock onto visible enemies.
+*   **Advanced Team Check:** Multi-tier team resolution (TeamId, TeamColor, Role, FFA Gamemode detection).
 
-</div>
+### Visuals (ESP)
+*   **2D Box ESP:** Rigid physics-root bounding boxes with health bars, names, and distance tags.
+*   **Skeleton ESP:** Full R15/Bloxstrike bone tracking.
+*   **Snaplines / Tracers:** Lines tracking from the bottom or center of the screen to the target.
+*   **Player Radar (Minimap):** Top-left 2D radar that tracks enemy positions relative to your camera. Adjustable zoom.
+*   **C4 Objective Tracker:** Highlights the planted bomb or dropped C4 with distance markers.
+*   **Occlusion/Streaming Fix:** Position Caching system renders ESP for 1 second after an enemy is culled by `StreamingEnabled` (prevents ESP from instantly disappearing behind walls).
 
----
+### Weapon Mods
+*   **No Recoil (Safe Hook):** Hooks `CameraController` to strip weapon kick rotation without breaking the client-server replication state machine (no buy-menu delays).
+*   **No Spread (Attribute Overwrite):** Scans equipped tools and ReplicatedStorage to force `Spread` properties to 0.
+*   **Auto Reload:** Monitors current ammo and automatically simulates the 'R' keypress when the magazine is empty.
+*   **Anti-Flashbang:** Instant blind wipe by suppressing Lighting `BlurEffect` and GUI overlays.
 
-## 🚀 Quick Execution (Xeno / Universal)
-
-Salin one-liner di bawah ini dan paste langsung ke executor Anda (Xeno, Wave, Solara, etc.):
-
-```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/bwx330-dev/bwx-bloxstrike/main/bwx-bloxstrike.lua"))()
-```
-
----
-
-## 🎯 Fitur Utama
-
-### 🔫 1. Combat & Target Acquisition
-* **Silent Aim:** Intersepsi metatable raycast (`Workspace.Raycast` dan `FindPartOnRayWithIgnoreList`) langsung mengarahkan vektor tembakan ke target tanpa mengubah arah pandang kamera asli.
-* **Camera Aim Assist:** Interpolasi `CFrame.lookAt` dengan pengaturan *smoothness* responsif untuk tracking halus saat menekan `MouseButton2`.
-* **Dynamic FOV Circle:** Visualisasi radius target dengan warna dan ketebalan yang dapat dikustomisasi.
-* **Bone Selection:** Opsi prioritas penargetan (`Head`, `UpperTorso`, atau `HumanoidRootPart`).
-* **Team & Visibility Check:** Memfilter rekan satu tim (CT/T) dan mengabaikan target di balik tembok tebal.
-
-### 👁️ 2. Visuals & Spatial ESP (Drawing API)
-* **2D Bounding Box ESP:** Kalkulasi aspect ratio dinamis dari proyeksi 3D ke 2D viewport.
-* **Health Bar & Percentage:** Bar status darah real-time dengan gradasi warna HSV (Hijau ➔ Kuning ➔ Merah).
-* **Distance & Player Nametags:** Menampilkan jarak meter dan display name target secara akurat.
-* **Tracers / Snaplines:** Garis pelacak asal layar (Bottom / Center) menuju posisi kaki musuh.
-* **C4 Objective Tracker:** Mendeteksi lokasi bom aktif di seluruh map lengkap dengan indikator jarak.
-
-### ⚙️ 3. Weapon Modifications
-* **No Recoil:** Meredam getaran kamera (`camera punch`) dan kalkulasi recoil recoil-spring.
-* **No Spread:** Menjaga lintasan peluru tetap lurus pada titik tengah crosshair.
-* **Anti-Flashbang:** Otomatis menghapus visual blur dan overlay putih `Flash/Blind` pada `PlayerGui` dan `Lighting`.
-
-### 🏃 4. Movement Mechanics
-* **Auto-Bunnyhop (Bhop):** Deteksi kontak material lantai (`FloorMaterial ~= Air`) setiap frame untuk melompat seketika saat tombol `Space` ditahan tanpa kehilangan kecepatan momentum.
+### Movement
+*   **Auto Bunnyhop:** Hold Space to automatically jump upon landing.
 
 ---
 
-## ⌨️ Kontrol & Keybinds
+## 🛠️ Technical Architecture
 
-| Tombol | Fungsi |
-| :--- | :--- |
-| **`Insert`** atau **`Right Shift`** | Membuka / Menutup menu antarmuka (Toggle UI) |
-| **`Right Click (Hold)`** | Mengaktifkan Aim Assist tracking |
-| **`Space (Hold)`** | Melakukan auto-bunnyhop terus menerus |
-
----
-
-## 🛠️ Arsitektur & Teknologi
-
-* **Runtime:** Luau JIT Compatibility Layer.
-* **Rendering Engine:** Core Drawing Library (Zero Part-Lag & No Geometry Leak).
-* **Hooking Vector:** `hookmetamethod(game, "__namecall")` & `hookfunction(workspace.Raycast)`.
-* **Memory Management:** Auto-destructor lifecycle (`environment.BWXUnload`) untuk mencegah memory leak saat inject ulang.
+*   **Non-Invasive Hook Framework:** Unlike standard exploits that break weapon purchasing, BWX uses a strict safe-hook on `weaponKick` and `getWeaponKickRotation`, ensuring the replication engine remains 100% native.
+*   **Zero-GC Drawing Pool:** Drawings are recycled and reused rather than destroyed every frame, preventing CPU frame-time spikes and stutters.
+*   **Safe Memory Restoration:** Hitboxes and hooked functions are cleanly reverted upon unload via `env.BWXUnload()` to prevent crashing.
+*   **FFA / Deathmatch Aware:** Automatically disables team checks if the game mode is detected as Deathmatch or FFA.
 
 ---
 
-<div align="center">
-<sub>Built & Maintained by <a href="https://github.com/bwx330-dev">bwx330-dev</a></sub>
-</div>
+## 📜 Usage
+
+1. Launch **Bloxstrike** on Roblox.
+2. Open your executor (**Xeno** recommended).
+3. Paste the script and execute.
+4. Press **K** or **Insert** to toggle the UI.
+
+### Keybinds
+*   `K` / `Insert` - Toggle Menu
+*   `LMB` (Hold) - Trigger Aimlock & No Recoil
+*   `Space` (Hold) - Bunnyhop
+
+---
+
+## 📝 Changelog
+
+*   **v3.11** - Added Auto Reload, Player Radar (Minimap), and improved UI sliders.
+*   **v3.10** - Implemented Safe CameraHook for No Recoil. Fixed Crosshair rising issue.
+*   **v3.8** - Non-invasive No Spread (Property Overwrite). Removed unstable raycast hooks.
+*   **v3.6** - Added Position Caching for `StreamingEnabled` (ESP no longer vanishes behind walls).
+*   **v3.4** - Fixed FOV logic, team checks, and memory leaks.
+
+---
+*Created for private use. Optimized for Xeno & Synapse.*

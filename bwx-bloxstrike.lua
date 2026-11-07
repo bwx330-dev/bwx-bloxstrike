@@ -1,17 +1,20 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v3.10 Safe CameraHook No Recoil)
+    ⚡ BWX // Bloxstrike Utility Suite (v3.11 Radar & Auto Reload Edition)
     Optimized for Xeno & Modern Executors
     Target: Roblox Bloxstrike (7633926880)
 
-    Architectural Updates in v3.10:
-      FIX: Native Property No Recoil failed (game uses internal modules).
-        - Implemented Safe CameraController Hook.
-        - Hooks `weaponKick` and `getWeaponKickRotation` to strip rotation.
-        - Preserves the return type (CFrame/Vector3) so replication state machine never breaks.
-        - Allows you to buy weapons and shoot normally without recoil.
+    Architectural Updates in v3.11:
+      NEW: Auto Reload
+        - Monitors equipped Tool ammo (Attributes/Values).
+        - Simulates 'R' keypress automatically when ammo hits 0.
+      NEW: Player Radar / Minimap
+        - Drawing-based 2D Radar in the top-left corner.
+        - Renders enemy blips relative to the LocalPlayer's Camera.
+        - Clamped to radar bounds, rotates with camera.
       PRESERVED CORE ARCHITECTURE:
+        - Safe CameraHook No Recoil (Zero replication stall).
         - Non-invasive property/attribute overwrite No Spread.
-        - LMB Aimlock (MouseButton1) with smooth 0.22 tracking and LockCenter enforcement.
+        - LMB Aimlock (MouseButton1) with smooth 0.22 tracking.
         - Position Caching ESP with 1-second grace period.
         - Head-only Hitbox Expander with safe memory restoration.
         - Multi-tier team normalization and FFA check.
@@ -29,17 +32,16 @@ local Workspace = game:GetService("Workspace")
 local Lighting = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
 
--- Global Unload of prior instances
 local env = getgenv and getgenv() or _G
 if env.BWXUnload then pcall(env.BWXUnload) end
 if env.CybrionUnload then pcall(env.CybrionUnload) end
 if env.BloxStrikeUnload then pcall(env.BloxStrikeUnload) end
 
--- Configuration Table
 local Config = {
     Combat = {
         AimLock = true,
@@ -66,12 +68,16 @@ local Config = {
         DistanceESP = true,
         MaxDistance = 5000,
         C4Tracker = true,
-        C4Color = Color3.fromRGB(250, 195, 60)
+        C4Color = Color3.fromRGB(250, 195, 60),
+        Radar = true,        -- NEW
+        RadarSize = 120,     -- NEW
+        RadarZoom = 0.5      -- NEW
     },
     WeaponMods = {
         NoRecoil = true,
         NoSpread = true,
-        AntiFlash = true
+        AntiFlash = true,
+        AutoReload = true    -- NEW
     },
     Movement = {
         Bhop = true
@@ -97,13 +103,18 @@ local Runtime = {
     RecoilHookInstalled = false,
     LastHookCheck = 0,
     LastC4Check = 0,
-    CachedC4 = nil
+    CachedC4 = nil,
+    LastReloadTime = 0, -- NEW
+    RadarBg = nil,      -- NEW
+    RadarBorder = nil,  -- NEW
+    RadarBlips = {}     -- NEW
 }
 
 local WallParams = RaycastParams.new()
 WallParams.FilterType = Enum.RaycastFilterType.Exclude
 WallParams.IgnoreWater = true
 
+-- FOV Circle
 Runtime.FOVDrawing = Drawing.new("Circle")
 Runtime.FOVDrawing.Thickness = 1.5
 Runtime.FOVDrawing.NumSides = 48
@@ -113,6 +124,22 @@ Runtime.FOVDrawing.Radius = Config.Combat.FOV
 Runtime.FOVDrawing.Color = Config.Combat.FOVColor
 Runtime.FOVDrawing.Visible = Config.Combat.ShowFOV
 
+-- Radar Setup
+Runtime.RadarBg = Drawing.new("Circle")
+Runtime.RadarBg.Filled = true
+Runtime.RadarBg.Color = Color3.fromRGB(15, 17, 19)
+Runtime.RadarBg.Transparency = 0.6
+Runtime.RadarBg.NumSides = 32
+Runtime.RadarBg.Visible = false
+
+Runtime.RadarBorder = Drawing.new("Circle")
+Runtime.RadarBorder.Filled = false
+Runtime.RadarBorder.Color = Color3.fromRGB(50, 230, 150)
+Runtime.RadarBorder.Thickness = 1.5
+Runtime.RadarBorder.NumSides = 32
+Runtime.RadarBorder.Visible = false
+
+-- C4 Text
 Runtime.C4Drawing = Drawing.new("Text")
 Runtime.C4Drawing.Size = 13
 Runtime.C4Drawing.Center = true
@@ -120,6 +147,7 @@ Runtime.C4Drawing.Outline = true
 Runtime.C4Drawing.Color = Config.Visuals.C4Color
 Runtime.C4Drawing.Visible = false
 
+-- Banner
 Runtime.NoticeDrawing = Drawing.new("Text")
 Runtime.NoticeDrawing.Size = 14
 Runtime.NoticeDrawing.Center = true
@@ -140,40 +168,31 @@ local function SetupNoRecoil()
     if camModuleScript and camModuleScript:IsA("ModuleScript") then
         local ok, camModule = pcall(require, camModuleScript)
         if ok and type(camModule) == "table" then
-            -- 1. Hook weaponKick
             if type(camModule.weaponKick) == "function" and not Runtime.Hooks["weaponKick"] then
                 local oldKick = camModule.weaponKick
                 camModule.weaponKick = function(...)
                     local result = oldKick(...)
                     if Config.WeaponMods.NoRecoil and result then
-                        if typeof(result) == "CFrame" then
-                            return CFrame.new(result.Position) -- Strip rotation, keep position
-                        elseif typeof(result) == "Vector3" then
-                            return Vector3.zero
-                        end
+                        if typeof(result) == "CFrame" then return CFrame.new(result.Position)
+                        elseif typeof(result) == "Vector3" then return Vector3.zero end
                     end
                     return result
                 end
                 Runtime.Hooks["weaponKick"] = function() camModule.weaponKick = oldKick end
             end
 
-            -- 2. Hook getWeaponKickRotation
             if type(camModule.getWeaponKickRotation) == "function" and not Runtime.Hooks["getWeaponKickRotation"] then
                 local oldRot = camModule.getWeaponKickRotation
                 camModule.getWeaponKickRotation = function(...)
                     local result = oldRot(...)
                     if Config.WeaponMods.NoRecoil and result then
-                        if typeof(result) == "CFrame" then
-                            return CFrame.new()
-                        elseif typeof(result) == "Vector3" then
-                            return Vector3.zero
-                        end
+                        if typeof(result) == "CFrame" then return CFrame.new()
+                        elseif typeof(result) == "Vector3" then return Vector3.zero end
                     end
                     return result
                 end
                 Runtime.Hooks["getWeaponKickRotation"] = function() camModule.getWeaponKickRotation = oldRot end
             end
-
             Runtime.RecoilHookInstalled = true
         end
     end
@@ -201,7 +220,28 @@ local function ApplyNoSpread()
     end
 end
 
--- Team Normalization
+local function ApplyAutoReload()
+    if not Config.WeaponMods.AutoReload then return end
+    local now = os.clock()
+    if now - Runtime.LastReloadTime < 1.0 then return end -- Cooldown
+
+    local myChar = LocalPlayer.Character
+    if not myChar then return end
+    local tool = myChar:FindFirstChildOfClass("Tool")
+    if not tool then return end
+
+    local ammo = tool:GetAttribute("Ammo") or tool:GetAttribute("CurrentAmmo") or tool:GetAttribute("Mag")
+    local ammoVal = tool:FindFirstChild("Ammo") or tool:FindFirstChild("CurrentAmmo") or tool:FindFirstChild("Mag")
+    if ammoVal and ammoVal:IsA("ValueBase") then ammo = ammoVal.Value end
+
+    if tonumber(ammo) == 0 then
+        Runtime.LastReloadTime = now
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
+        task.wait(0.1)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.R, false, game)
+    end
+end
+
 local function NormalizeTeam(val)
     if val == nil then return nil end
     local s = tostring(val):lower()
@@ -358,6 +398,7 @@ end
 table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
     GuardMatchUI()
     ApplyNoSpread()
+    ApplyAutoReload()
 
     local now = os.clock()
     if now - Runtime.LastHookCheck > 2.0 then
@@ -378,6 +419,22 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
 
     if Runtime.FOVDrawing then
         Runtime.FOVDrawing.Position = center; Runtime.FOVDrawing.Radius = fov; Runtime.FOVDrawing.Color = Config.Combat.FOVColor; Runtime.FOVDrawing.Visible = Config.Combat.ShowFOV
+    end
+
+    -- RADAR SETUP
+    local radarCenter = Vector2.new(100, 100 + 36) -- Top-left, avoiding Roblox topbar
+    local radarRadius = Config.Visuals.RadarSize / 2
+    if Config.Visuals.Radar then
+        Runtime.RadarBg.Position = radarCenter
+        Runtime.RadarBg.Radius = radarRadius
+        Runtime.RadarBg.Visible = true
+        
+        Runtime.RadarBorder.Position = radarCenter
+        Runtime.RadarBorder.Radius = radarRadius
+        Runtime.RadarBorder.Visible = true
+    else
+        Runtime.RadarBg.Visible = false
+        Runtime.RadarBorder.Visible = false
     end
 
     if not Config.Combat.SilentAim and next(Runtime.OriginalSizes) then ResetAllHitboxes() end
@@ -407,6 +464,34 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
 
                         Runtime.CachedPositions[id] = { Position = rootPos, LastSeen = now, Team = isTeam, DisplayName = displayName, Player = player, Health = hp, MaxHealth = maxHp }
                         if Config.Combat.SilentAim and not isTeam then ApplyHitbox(model) end
+
+                        -- RADAR DRAWING
+                        if Config.Visuals.Radar and not isTeam and dist <= maxDist then
+                            local relative = Camera.CFrame:PointToObjectSpace(rootPos)
+                            local rx = radarCenter.X + (relative.X * Config.Visuals.RadarZoom)
+                            local ry = radarCenter.Y + (relative.Z * Config.Visuals.RadarZoom)
+                            
+                            -- Clamp to circle
+                            local distToCenter = (Vector2.new(rx, ry) - radarCenter).Magnitude
+                            if distToCenter > radarRadius then
+                                local dir = (Vector2.new(rx, ry) - radarCenter).Unit
+                                rx = radarCenter.X + dir.X * radarRadius
+                                ry = radarCenter.Y + dir.Y * radarRadius
+                            end
+
+                            if not Runtime.RadarBlips[id] then
+                                Runtime.RadarBlips[id] = Drawing.new("Circle")
+                                Runtime.RadarBlips[id].Radius = 3
+                                Runtime.RadarBlips[id].Filled = true
+                                Runtime.RadarBlips[id].NumSides = 8
+                            end
+                            local blip = Runtime.RadarBlips[id]
+                            blip.Position = Vector2.new(rx, ry)
+                            blip.Color = Config.Visuals.EnemyColor
+                            blip.Visible = true
+                        elseif Runtime.RadarBlips[id] then
+                            Runtime.RadarBlips[id].Visible = false
+                        end
 
                         local draw = GetOrCreateDrawing(id)
                         if visualsOn and not (Config.Visuals.TeamCheck and isTeam) and dist <= maxDist then
@@ -456,6 +541,15 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
+    -- Cleanup Radar Blips for lost players
+    for id, blip in pairs(Runtime.RadarBlips) do
+        if not activeIds[id] then
+            blip:Remove()
+            Runtime.RadarBlips[id] = nil
+        end
+    end
+
+    -- Position Caching ESP
     if visualsOn then
         for id, cached in pairs(Runtime.CachedPositions) do
             if not activeIds[id] then
@@ -666,6 +760,7 @@ local function BuildUI()
     CreateSlider(combatPage, "FOV Radius", 30, 400, Config.Combat.FOV, "px", function(v) Config.Combat.FOV = v end)
     CreateDropdown(combatPage, "Target Hit Part", {"Head", "UpperTorso", "HumanoidRootPart"}, Config.Combat.HitPart, function(v) Config.Combat.HitPart = v end)
     CreateToggle(combatPage, "Visibility Check (Wallcheck)", Config.Combat.VisibleCheck, function(v) Config.Combat.VisibleCheck = v end)
+    
     local visualsPage = pages["Visuals"]
     CreateToggle(visualsPage, "Master ESP Switch", Config.Visuals.Enabled, function(v) Config.Visuals.Enabled = v end)
     CreateToggle(visualsPage, "Team Check (Filter CT / T)", Config.Visuals.TeamCheck, function(v) Config.Visuals.TeamCheck = v end)
@@ -676,12 +771,18 @@ local function BuildUI()
     CreateToggle(visualsPage, "Snaplines / Tracers", Config.Visuals.Tracers, function(v) Config.Visuals.Tracers = v end)
     CreateToggle(visualsPage, "C4 Bomb Tracker", Config.Visuals.C4Tracker, function(v) Config.Visuals.C4Tracker = v end)
     CreateSlider(visualsPage, "Max ESP Distance", 500, 8000, Config.Visuals.MaxDistance, "m", function(v) Config.Visuals.MaxDistance = v end)
+    CreateToggle(visualsPage, "Player Radar (Minimap)", Config.Visuals.Radar, function(v) Config.Visuals.Radar = v end)
+    CreateSlider(visualsPage, "Radar Zoom", 1, 10, math.floor(Config.Visuals.RadarZoom * 10), "x", function(v) Config.Visuals.RadarZoom = v / 10 end)
+
     local modsPage = pages["Gun Mods"]
     CreateToggle(modsPage, "No Recoil (Safe Hook)", Config.WeaponMods.NoRecoil, function(v) Config.WeaponMods.NoRecoil = v end)
     CreateToggle(modsPage, "No Spread (Attribute Overwrite)", Config.WeaponMods.NoSpread, function(v) Config.WeaponMods.NoSpread = v end)
+    CreateToggle(modsPage, "Auto Reload", Config.WeaponMods.AutoReload, function(v) Config.WeaponMods.AutoReload = v end)
     CreateToggle(modsPage, "Anti-Flashbang (Instant Blind Wipe)", Config.WeaponMods.AntiFlash, function(v) Config.WeaponMods.AntiFlash = v end)
+
     local movePage = pages["Movement"]
     CreateToggle(movePage, "Auto Bunnyhop (Bhop)", Config.Movement.Bhop, function(v) Config.Movement.Bhop = v end)
+    
     SwitchTab("Combat")
     UserInputService.InputBegan:Connect(function(input, processed)
         if not processed and (input.KeyCode == Enum.KeyCode.K or input.KeyCode == Enum.KeyCode.Insert) then
@@ -703,6 +804,10 @@ env.BWXUnload = function()
     if Runtime.FOVDrawing then pcall(function() Runtime.FOVDrawing:Remove() end) end
     if Runtime.C4Drawing then pcall(function() Runtime.C4Drawing:Remove() end) end
     if Runtime.NoticeDrawing then pcall(function() Runtime.NoticeDrawing:Remove() end) end
+    if Runtime.RadarBg then pcall(function() Runtime.RadarBg:Remove() end) end
+    if Runtime.RadarBorder then pcall(function() Runtime.RadarBorder:Remove() end) end
+    for id, blip in pairs(Runtime.RadarBlips) do pcall(function() blip:Remove() end) end
+    table.clear(Runtime.RadarBlips)
     for _, draw in pairs(Runtime.DrawingPool) do DestroyDrawing(draw) end
     table.clear(Runtime.DrawingPool)
     if GuiInstance then pcall(function() GuiInstance:Destroy() end) end
@@ -711,4 +816,4 @@ end
 env.CybrionUnload = env.BWXUnload
 env.BloxStrikeUnload = env.BWXUnload
 
-print("[BWX] Suite v3.10 Loaded. Safe CameraHook No Recoil.")
+print("[BWX] Suite v3.11 Loaded. Radar & Auto Reload Engine.")

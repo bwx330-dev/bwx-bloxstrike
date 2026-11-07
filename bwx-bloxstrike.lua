@@ -1,7 +1,8 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v3.13) 
+    ⚡ BWX // Bloxstrike Utility Suite (v3.14 Fully Stable)
     Target: Roblox Bloxstrike
-    Features: Safe Camera Hook (No Recoil), Deep Anti-Flash, Virtual Bhop, 5s ESP Cache.
+    Features: Aimlock, Hitbox, ESP Ghost Cache (5s), Deep Anti-Flash, Native Bhop.
+    NOTE: No Recoil/No Spread removed entirely. Game blocks all CameraController hooks.
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -11,9 +12,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local Lighting = game:GetService("Lighting")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
-local VirtualInputManager = game:GetService("VirtualInputManager")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera = Workspace.CurrentCamera
@@ -50,7 +49,6 @@ local Config = {
         C4Color = Color3.fromRGB(250, 195, 60)
     },
     WeaponMods = {
-        NoRecoil = true,
         AntiFlash = true
     },
     Movement = {
@@ -69,12 +67,8 @@ local Runtime = {
     NoticeDrawing = nil,
     NoticeStart = os.clock(),
     Connections = {},
-    Hooks = {},
-    RecoilHookInstalled = false,
-    LastHookCheck = 0,
     LastC4Check = 0,
-    CachedC4 = nil,
-    BhopDelay = 0
+    CachedC4 = nil
 }
 
 local WallParams = RaycastParams.new()
@@ -94,35 +88,8 @@ Runtime.NoticeDrawing = Drawing.new("Text")
 Runtime.NoticeDrawing.Size = 14; Runtime.NoticeDrawing.Center = true; Runtime.NoticeDrawing.Outline = true
 Runtime.NoticeDrawing.Color = Color3.fromRGB(50, 230, 150)
 Runtime.NoticeDrawing.Position = Vector2.new(Camera.ViewportSize.X / 2, 40)
-Runtime.NoticeDrawing.Text = "⚡ BWX BLOXSTRIKE v3.13 READY"
+Runtime.NoticeDrawing.Text = "⚡ BWX BLOXSTRIKE v3.14 READY"
 Runtime.NoticeDrawing.Visible = true
-
--- SAFE WEAPON HOOK (Stealth Recoil Removal)
-local function SetupNoRecoil()
-    if Runtime.RecoilHookInstalled then return end
-    local controllers = ReplicatedStorage:FindFirstChild("Controllers")
-    local camModuleScript = controllers and controllers:FindFirstChild("CameraController")
-    
-    if camModuleScript and camModuleScript:IsA("ModuleScript") then
-        local ok, camModule = pcall(require, camModuleScript)
-        if ok and type(camModule) == "table" then
-            if type(camModule.weaponKick) == "function" and not Runtime.Hooks["weaponKick"] then
-                local oldKick = camModule.weaponKick
-                camModule.weaponKick = function(camCF, ...)
-                    -- Instead of returning a new CFrame, we return the original camera CFrame
-                    -- This completely negates the recoil without breaking the state machine
-                    if Config.WeaponMods.NoRecoil and typeof(camCF) == "CFrame" then
-                        return camCF 
-                    end
-                    return oldKick(camCF, ...)
-                end
-                Runtime.Hooks["weaponKick"] = function() camModule.weaponKick = oldKick end
-            end
-            Runtime.RecoilHookInstalled = true
-        end
-    end
-end
-pcall(SetupNoRecoil)
 
 local function NormalizeTeam(val)
     if val == nil then return nil end
@@ -234,7 +201,6 @@ local function ResetAllHitboxes()
     table.clear(Runtime.OriginalSizes)
 end
 
--- DEEP ANTI-FLASH
 local function SetupAntiFlash()
     task.spawn(function()
         while Runtime.Active do
@@ -264,11 +230,6 @@ SetupAntiFlash()
 table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
     local now = os.clock()
     
-    if now - Runtime.LastHookCheck > 2.0 then
-        Runtime.LastHookCheck = now
-        if not Runtime.RecoilHookInstalled then pcall(SetupNoRecoil) end
-    end
-
     if Runtime.NoticeDrawing and Runtime.NoticeDrawing.Visible then
         if now - Runtime.NoticeStart > 5.0 then Runtime.NoticeDrawing.Visible = false end
     end
@@ -365,7 +326,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- 5 SECOND GHOST CACHE (For Spectate-like ESP)
+    -- 5 SECOND GHOST CACHE
     if visualsOn then
         for id, cached in pairs(Runtime.CachedPositions) do
             if not activeIds[id] then
@@ -374,7 +335,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
                     local d = Runtime.DrawingPool[id]; if d then HideDrawing(d) end
                 else
                     local elapsed = now - cached.LastSeen
-                    if elapsed <= 5.0 then -- 5 Seconds!
+                    if elapsed <= 5.0 then
                         activeIds[id] = true
                         local isTeam = cached.Team
                         if not (Config.Visuals.TeamCheck and isTeam) then
@@ -389,7 +350,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
                                     local draw = GetOrCreateDrawing(id)
                                     if onScreen then
                                         local col = isTeam and Config.Visuals.TeamColor or Config.Visuals.EnemyColor
-                                        local ghostAlpha = 1 - (elapsed / 5.0) -- Fades out over 5s
+                                        local ghostAlpha = 1 - (elapsed / 5.0)
                                         
                                         if Config.Visuals.BoxESP then
                                             draw.BoxOutline.Size = Vector2.new(width, height); draw.BoxOutline.Position = boxPos; draw.BoxOutline.Transparency = 0.8 * ghostAlpha; draw.BoxOutline.Visible = true
@@ -473,18 +434,13 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- VIRTUAL BHOP (Simulates Spacebar)
+    -- NATIVE BHOP
     if Config.Movement.Bhop and UserInputService:IsKeyDown(Enum.KeyCode.Space) then
         if not UserInputService:GetFocusedTextBox() then
             local char = (Workspace:FindFirstChild("Characters") and Workspace.Characters:FindFirstChild(LocalPlayer.Name)) or LocalPlayer.Character
             local hum = char and char:FindFirstChildOfClass("Humanoid")
-            if hum and hum.FloorMaterial ~= Enum.Material.Air then
-                if now - Runtime.BhopDelay > 0.1 then
-                    Runtime.BhopDelay = now
-                    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
-                    task.wait(0.05)
-                    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
-                end
+            if hum and hum.FloorMaterial ~= Enum.Material.Air then 
+                hum.Jump = true 
             end
         end
     end
@@ -507,7 +463,7 @@ local function BuildUI()
     header.Name = "Header"; header.Size = UDim2.new(1, 0, 0, 42); header.BackgroundColor3 = Theme.Header; header.BorderSizePixel = 0; header.Parent = main
     local headerCorner = Instance.new("UICorner"); headerCorner.CornerRadius = UDim.new(0, 8); headerCorner.Parent = header
     local title = Instance.new("TextLabel")
-    title.Text = "⚡ BWX // BLOXSTRIKE (v3.13)"
+    title.Text = "⚡ BWX // BLOXSTRIKE (v3.14)"
     title.Font = Enum.Font.GothamBold; title.TextSize = 14; title.TextColor3 = Theme.Accent
     title.TextXAlignment = Enum.TextXAlignment.Left; title.BackgroundTransparency = 1
     title.Position = UDim2.new(0, 14, 0, 0); title.Size = UDim2.new(0.6, 0, 1, 0); title.Parent = header
@@ -594,11 +550,10 @@ local function BuildUI()
     CreateSlider(visualsPage, "Max ESP Distance", 500, 8000, Config.Visuals.MaxDistance, "m", function(v) Config.Visuals.MaxDistance = v end)
 
     local modsPage = pages["Gun Mods"]
-    CreateToggle(modsPage, "No Recoil (Safe Hook)", Config.WeaponMods.NoRecoil, function(v) Config.WeaponMods.NoRecoil = v end)
     CreateToggle(modsPage, "Anti-Flashbang (Deep Scan)", Config.WeaponMods.AntiFlash, function(v) Config.WeaponMods.AntiFlash = v end)
 
     local movePage = pages["Movement"]
-    CreateToggle(movePage, "Auto Bunnyhop (Virtual Input)", Config.Movement.Bhop, function(v) Config.Movement.Bhop = v end)
+    CreateToggle(movePage, "Auto Bunnyhop (Native)", Config.Movement.Bhop, function(v) Config.Movement.Bhop = v end)
     
     SwitchTab("Combat")
     UserInputService.InputBegan:Connect(function(input, processed)
@@ -616,8 +571,6 @@ env.BWXUnload = function()
     ResetAllHitboxes(); table.clear(Runtime.CachedPositions)
     for _, conn in ipairs(Runtime.Connections) do pcall(function() conn:Disconnect() end) end
     table.clear(Runtime.Connections)
-    for _, unhook in pairs(Runtime.Hooks) do pcall(unhook) end
-    table.clear(Runtime.Hooks)
     if Runtime.FOVDrawing then pcall(function() Runtime.FOVDrawing:Remove() end) end
     if Runtime.C4Drawing then pcall(function() Runtime.C4Drawing:Remove() end) end
     if Runtime.NoticeDrawing then pcall(function() Runtime.NoticeDrawing:Remove() end) end
@@ -628,4 +581,4 @@ env.BWXUnload = function()
 end
 env.BWXUnload = env.BWXUnload
 
-print("[BWX] Suite v3.13 Loaded. Deep Scan & Virtual Bhop.")
+print("[BWX] Suite v3.14 Loaded. Fully Stable.")

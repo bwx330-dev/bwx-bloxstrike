@@ -1,19 +1,19 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v3.11.1 Hookless Safe Edition)
+    ⚡ BWX // Bloxstrike Utility Suite (v3.11.2 UI Version Tag)
     Optimized for Xeno & Modern Executors
     Target: Roblox Bloxstrike (7633926880)
 
-    Architectural Updates in v3.11.1:
-      FIX: Removed CameraController hooks completely (causes replication stalls).
-      NEW: Hookless No Recoil (Property Overwrite).
-      NEW: Auto Reload (Disabled by default to prevent accidental R-spam).
-      NEW: Player Radar (Minimap).
+    Architectural Updates in v3.11.2:
+      UI: Added Version Tag to Header and Startup Banner.
       PRESERVED CORE ARCHITECTURE:
-        - Non-invasive property/attribute overwrite No Spread.
+        - Hookless Safe Edition (Zero replication stalls).
+        - Non-invasive property/attribute overwrite No Spread & No Recoil.
         - LMB Aimlock (MouseButton1) with smooth 0.22 tracking.
         - Position Caching ESP with 1-second grace period.
         - Head-only Hitbox Expander with safe memory restoration.
         - Multi-tier team normalization and FFA check.
+        - Player Radar (Minimap).
+        - Auto Reload (Disabled by default).
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -121,7 +121,7 @@ Runtime.NoticeDrawing = Drawing.new("Text")
 Runtime.NoticeDrawing.Size = 14; Runtime.NoticeDrawing.Center = true; Runtime.NoticeDrawing.Outline = true
 Runtime.NoticeDrawing.Color = Color3.fromRGB(50, 230, 150)
 Runtime.NoticeDrawing.Position = Vector2.new(Camera.ViewportSize.X / 2, 40)
-Runtime.NoticeDrawing.Text = "⚡ BWX BLOXSTRIKE READY [Tekan K / Insert untuk Menu]"
+Runtime.NoticeDrawing.Text = "⚡ BWX BLOXSTRIKE v3.11.2 READY [Tekan K / Insert untuk Menu]"
 Runtime.NoticeDrawing.Visible = true
 
 -- =========================================================================
@@ -594,7 +594,13 @@ local function BuildUI()
     header.Name = "Header"; header.Size = UDim2.new(1, 0, 0, 42); header.BackgroundColor3 = Theme.Header; header.BorderSizePixel = 0; header.Parent = main
     local headerCorner = Instance.new("UICorner"); headerCorner.CornerRadius = UDim.new(0, 8); headerCorner.Parent = header
     local headerBottom = Instance.new("Frame"); headerBottom.Size = UDim2.new(1, 0, 0, 8); headerBottom.Position = UDim2.new(0, 0, 1, -8); headerBottom.BackgroundColor3 = Theme.Header; headerBottom.BorderSizePixel = 0; headerBottom.Parent = header
-    local title = Instance.new("TextLabel"); title.Text = "⚡ BWX // BLOXSTRIKE"; title.Font = Enum.Font.GothamBold; title.TextSize = 14; title.TextColor3 = Theme.Accent; title.TextXAlignment = Enum.TextXAlignment.Left; title.BackgroundTransparency = 1; title.Position = UDim2.new(0, 14, 0, 0); title.Size = UDim2.new(0.6, 0, 1, 0); title.Parent = header
+    
+    local title = Instance.new("TextLabel")
+    title.Text = "⚡ BWX // BLOXSTRIKE (v3.11.2)"
+    title.Font = Enum.Font.GothamBold; title.TextSize = 14; title.TextColor3 = Theme.Accent
+    title.TextXAlignment = Enum.TextXAlignment.Left; title.BackgroundTransparency = 1
+    title.Position = UDim2.new(0, 14, 0, 0); title.Size = UDim2.new(0.6, 0, 1, 0); title.Parent = header
+    
     local hint = Instance.new("TextLabel"); hint.Text = "Toggle: [K] / [Insert]"; hint.Font = Enum.Font.Gotham; hint.TextSize = 11; hint.TextColor3 = Theme.Muted; hint.TextXAlignment = Enum.TextXAlignment.Right; hint.BackgroundTransparency = 1; hint.Position = UDim2.new(0.4, 0, 0, 0); hint.Size = UDim2.new(0.56, 0, 1, 0); hint.Parent = header
     local dragging, dragStart, startPos
     header.InputBegan:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true; dragStart = input.Position; startPos = main.Position end end)
@@ -719,4 +725,4 @@ env.BWXUnload = function()
 end
 env.BWXUnload = env.BWXUnload
 
-print("[BWX] Suite v3.11.1 Loaded. Hookless Safe Edition.")
+print("[BWX] Suite v3.11.2 Loaded. Hookless Safe Edition.")

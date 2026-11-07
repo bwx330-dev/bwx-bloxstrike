@@ -1,15 +1,7 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v3.12 Clean & Stable Edition)
-    Optimized for Xeno & Modern Executors
-    Target: Roblox Bloxstrike (7633926880)
-
-    Architectural Updates in v3.12:
-      REMOVED: Player Radar (useless due to StreamingEnabled occlusion).
-      FIXED: ESP now hides instantly upon death (purges position cache).
-      HONEST NOTE: No Recoil/No Spread/AutoReload are heavily restricted by 
-      server-side validation. They are included but may not function if the 
-      game does not use client-readable attributes.
-      PRESERVED: Zero replication stalls (buy/shoot works). LMB Aimlock. ESP.
+    ⚡ BWX // Bloxstrike Utility Suite (v3.13) 
+    Target: Roblox Bloxstrike
+    Features: Safe Camera Hook (No Recoil), Deep Anti-Flash, Virtual Bhop, 5s ESP Cache.
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -19,6 +11,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local Lighting = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 
@@ -57,17 +50,13 @@ local Config = {
         C4Color = Color3.fromRGB(250, 195, 60)
     },
     WeaponMods = {
-        NoRecoil = false, -- Disabled by default (server authoritative)
-        NoSpread = false, -- Disabled by default
-        AntiFlash = true,
-        AutoReload = false
+        NoRecoil = true,
+        AntiFlash = true
     },
     Movement = {
         Bhop = true
     },
-    UI = {
-        MenuOpen = false
-    }
+    UI = { MenuOpen = false }
 }
 
 local Runtime = {
@@ -80,9 +69,12 @@ local Runtime = {
     NoticeDrawing = nil,
     NoticeStart = os.clock(),
     Connections = {},
+    Hooks = {},
+    RecoilHookInstalled = false,
+    LastHookCheck = 0,
     LastC4Check = 0,
     CachedC4 = nil,
-    LastReloadTime = 0
+    BhopDelay = 0
 }
 
 local WallParams = RaycastParams.new()
@@ -102,66 +94,35 @@ Runtime.NoticeDrawing = Drawing.new("Text")
 Runtime.NoticeDrawing.Size = 14; Runtime.NoticeDrawing.Center = true; Runtime.NoticeDrawing.Outline = true
 Runtime.NoticeDrawing.Color = Color3.fromRGB(50, 230, 150)
 Runtime.NoticeDrawing.Position = Vector2.new(Camera.ViewportSize.X / 2, 40)
-Runtime.NoticeDrawing.Text = "⚡ BWX BLOXSTRIKE v3.12 READY [Tekan K / Insert untuk Menu]"
+Runtime.NoticeDrawing.Text = "⚡ BWX BLOXSTRIKE v3.13 READY"
 Runtime.NoticeDrawing.Visible = true
 
--- =========================================================================
--- ATTRIBUTE OVERWRITES (Honest attempt, but server may ignore)
--- =========================================================================
-local function ApplyNoSpread()
-    if not Config.WeaponMods.NoSpread then return end
-    local myChar = (Workspace:FindFirstChild("Characters") and Workspace.Characters:FindFirstChild(LocalPlayer.Name)) or LocalPlayer.Character
-    if myChar then
-        local tool = myChar:FindFirstChildOfClass("Tool")
-        if tool then
-            for _, attr in ipairs({"Spread", "BaseSpread", "MinSpread", "MaxSpread", "CurrentSpread", "Inaccuracy", "WeaponSpread"}) do
-                if tool:GetAttribute(attr) ~= nil and tool:GetAttribute(attr) ~= 0 then pcall(function() tool:SetAttribute(attr, 0) end) end
+-- SAFE WEAPON HOOK (Stealth Recoil Removal)
+local function SetupNoRecoil()
+    if Runtime.RecoilHookInstalled then return end
+    local controllers = ReplicatedStorage:FindFirstChild("Controllers")
+    local camModuleScript = controllers and controllers:FindFirstChild("CameraController")
+    
+    if camModuleScript and camModuleScript:IsA("ModuleScript") then
+        local ok, camModule = pcall(require, camModuleScript)
+        if ok and type(camModule) == "table" then
+            if type(camModule.weaponKick) == "function" and not Runtime.Hooks["weaponKick"] then
+                local oldKick = camModule.weaponKick
+                camModule.weaponKick = function(camCF, ...)
+                    -- Instead of returning a new CFrame, we return the original camera CFrame
+                    -- This completely negates the recoil without breaking the state machine
+                    if Config.WeaponMods.NoRecoil and typeof(camCF) == "CFrame" then
+                        return camCF 
+                    end
+                    return oldKick(camCF, ...)
+                end
+                Runtime.Hooks["weaponKick"] = function() camModule.weaponKick = oldKick end
             end
-            for _, name in ipairs({"Spread", "BaseSpread", "MinSpread", "MaxSpread", "Inaccuracy"}) do
-                local val = tool:FindFirstChild(name, true)
-                if val and (val:IsA("NumberValue") or val:IsA("IntValue")) and val.Value ~= 0 then pcall(function() val.Value = 0 end) end
-            end
+            Runtime.RecoilHookInstalled = true
         end
     end
 end
-
-local function ApplyNoRecoil()
-    if not Config.WeaponMods.NoRecoil then return end
-    local myChar = (Workspace:FindFirstChild("Characters") and Workspace.Characters:FindFirstChild(LocalPlayer.Name)) or LocalPlayer.Character
-    if myChar then
-        local tool = myChar:FindFirstChildOfClass("Tool")
-        if tool then
-            for _, attr in ipairs({"Recoil", "CameraRecoil", "WeaponKick", "Kickback", "VerticalRecoil", "RecoilPitch", "RecoilYaw"}) do
-                if tool:GetAttribute(attr) ~= nil and tool:GetAttribute(attr) ~= 0 then pcall(function() tool:SetAttribute(attr, 0) end) end
-            end
-            for _, name in ipairs({"Recoil", "CameraRecoil", "WeaponKick", "Kickback", "VerticalRecoil"}) do
-                local val = tool:FindFirstChild(name, true)
-                if val and (val:IsA("NumberValue") or val:IsA("IntValue")) and val.Value ~= 0 then pcall(function() val.Value = 0 end) end
-            end
-        end
-    end
-end
-
-local function ApplyAutoReload()
-    if not Config.WeaponMods.AutoReload then return end
-    local now = os.clock()
-    if now - Runtime.LastReloadTime < 1.0 then return end
-    local myChar = LocalPlayer.Character
-    if not myChar then return end
-    local tool = myChar:FindFirstChildOfClass("Tool")
-    if not tool then return end
-    
-    local ammo = tool:GetAttribute("Ammo") or tool:GetAttribute("CurrentAmmo") or tool:GetAttribute("Mag")
-    local ammoVal = tool:FindFirstChild("Ammo") or tool:FindFirstChild("CurrentAmmo") or tool:FindFirstChild("Mag") or tool:FindFirstChild("Magazine") or tool:FindFirstChild("Clip")
-    if ammoVal and ammoVal:IsA("ValueBase") then ammo = ammoVal.Value end
-    
-    if tonumber(ammo) == 0 then
-        Runtime.LastReloadTime = now
-        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.R, false, game)
-        task.wait(0.1)
-        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.R, false, game)
-    end
-end
+pcall(SetupNoRecoil)
 
 local function NormalizeTeam(val)
     if val == nil then return nil end
@@ -173,28 +134,13 @@ end
 
 local function GetEntityTeam(model, player)
     if model then
-        local mTeam = model:GetAttribute("Team") or model:GetAttribute("TeamId") or model:GetAttribute("TeamName") or model:GetAttribute("Role") or model:GetAttribute("TeamColor")
+        local mTeam = model:GetAttribute("Team") or model:GetAttribute("TeamId") or model:GetAttribute("TeamName")
         local norm = NormalizeTeam(mTeam); if norm then return norm end
     end
     if player then
         if player.Team then local norm = NormalizeTeam(player.Team.Name); if norm then return norm end end
-        local pTeam = player:GetAttribute("Team") or player:GetAttribute("TeamId") or player:GetAttribute("TeamName") or player:GetAttribute("Role") or player:GetAttribute("TeamColor")
+        local pTeam = player:GetAttribute("Team") or player:GetAttribute("TeamId") or player:GetAttribute("TeamName")
         local norm = NormalizeTeam(pTeam); if norm then return norm end
-        if player.TeamColor then
-            local tc = tostring(player.TeamColor):lower()
-            if tc:find("blue") or tc:find("cobalt") or tc:find("cyan") then return "CT" end
-            if tc:find("red") or tc:find("orange") or tc:find("yellow") then return "T" end
-        end
-    end
-    if model then
-        local look = model:GetAttribute("CharacterName")
-        if look then
-            local ctLook = Workspace:GetAttribute("CTCharacter"); local tLook = Workspace:GetAttribute("TCharacter")
-            if ctLook and look == ctLook then return "CT" end; if tLook and look == tLook then return "T" end
-            local lookLower = tostring(look):lower()
-            if lookLower:find("ct") or lookLower:find("counter") or lookLower:find("swat") or lookLower:find("sas") or lookLower:find("seal") or lookLower:find("fbi") or lookLower:find("gsg") then return "CT" end
-            if lookLower:find("terror") or lookLower:find("phoenix") or lookLower:find("anarchist") or lookLower:find("balkan") or lookLower:find("leet") or lookLower:find("separatist") or lookLower:find("pirate") then return "T" end
-        end
     end
     return nil
 end
@@ -204,7 +150,7 @@ local function IsTeammate(model, player)
     if player == LocalPlayer or (model and model.Name == LocalPlayer.Name) then return true end
     local gm = tostring(Workspace:GetAttribute("Gamemode") or ""):lower()
     if gm:find("deathmatch") or gm:find("ffa") then return false end
-    local myChar = (Workspace:FindFirstChild("Characters") and Workspace.Characters:FindFirstChild(LocalPlayer.Name)) or LocalPlayer.Character
+    local myChar = LocalPlayer.Character
     if not myChar then return false end
     local myTeam = GetEntityTeam(myChar, LocalPlayer); if not myTeam then return false end
     local targetTeam = GetEntityTeam(model, player); if not targetTeam then return false end
@@ -288,40 +234,41 @@ local function ResetAllHitboxes()
     table.clear(Runtime.OriginalSizes)
 end
 
+-- DEEP ANTI-FLASH
 local function SetupAntiFlash()
-    local function MuteFlash(child)
-        if Config.WeaponMods.AntiFlash and child:IsA("BlurEffect") and child.Name:lower():find("flash") then
-            child.Size = 0
-            child:GetPropertyChangedSignal("Size"):Connect(function() if Config.WeaponMods.AntiFlash and child.Size > 0 then child.Size = 0 end end)
-        end
-    end
-    for _, obj in ipairs(Lighting:GetChildren()) do MuteFlash(obj) end
-    table.insert(Runtime.Connections, Lighting.ChildAdded:Connect(MuteFlash))
-end
-pcall(SetupAntiFlash)
-
-local function GuardMatchUI()
-    local chars = Workspace:FindFirstChild("Characters")
-    local myChar = chars and chars:FindFirstChild(LocalPlayer.Name)
-    if myChar and not IsModelDead(myChar, LocalPlayer) then
-        local pGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-        if pGui then
-            local menu = pGui:FindFirstChild("Menu") or pGui:FindFirstChild("MainMenu")
-            if menu and menu:IsA("ScreenGui") and menu.Enabled then
-                menu.Enabled = false
-                if not Config.UI.MenuOpen then pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter end) end
+    task.spawn(function()
+        while Runtime.Active do
+            if Config.WeaponMods.AntiFlash then
+                for _, obj in ipairs(Lighting:GetChildren()) do
+                    if obj:IsA("BlurEffect") or obj:IsA("ColorCorrectionEffect") then
+                        if obj.Enabled and (obj.Name:lower():find("flash") or obj.Name:lower():find("blind") or obj.Brightness > 1 or obj.Size > 0) then
+                            obj.Enabled = false
+                        end
+                    end
+                end
+                local pGui = LocalPlayer:FindFirstChild("PlayerGui")
+                if pGui then
+                    for _, gui in ipairs(pGui:GetChildren()) do
+                        if gui:IsA("ScreenGui") and (gui.Name:lower():find("flash") or gui.Name:lower():find("blind")) then
+                            gui.Enabled = false
+                        end
+                    end
+                end
             end
+            task.wait(0.1)
         end
-    end
+    end)
 end
+SetupAntiFlash()
 
 table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
-    GuardMatchUI()
-    ApplyNoSpread()
-    ApplyNoRecoil()
-    if Config.WeaponMods.AutoReload then ApplyAutoReload() end
-
     local now = os.clock()
+    
+    if now - Runtime.LastHookCheck > 2.0 then
+        Runtime.LastHookCheck = now
+        if not Runtime.RecoilHookInstalled then pcall(SetupNoRecoil) end
+    end
+
     if Runtime.NoticeDrawing and Runtime.NoticeDrawing.Visible then
         if now - Runtime.NoticeStart > 5.0 then Runtime.NoticeDrawing.Visible = false end
     end
@@ -359,7 +306,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
                         local isTeam = IsTeammate(model, player)
                         local rootPos = root.Position
                         local dist = (rootPos - camPos).Magnitude
-                        local hp = tonumber(model:GetAttribute("Health")) or (player and tonumber(player:GetAttribute("Health"))) or 100
+                        local hp = tonumber(model:GetAttribute("Health")) or 100
                         local maxHp = tonumber(model:GetAttribute("MaxHealth")) or 100
                         local displayName = (player and player.DisplayName) or model.Name
 
@@ -410,7 +357,6 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
                         end
                     end
                 else
-                    -- INSTANT PURGE ON DEATH
                     Runtime.CachedPositions[id] = nil
                     local draw = Runtime.DrawingPool[id]
                     if draw then HideDrawing(draw) end
@@ -419,6 +365,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
+    -- 5 SECOND GHOST CACHE (For Spectate-like ESP)
     if visualsOn then
         for id, cached in pairs(Runtime.CachedPositions) do
             if not activeIds[id] then
@@ -427,7 +374,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
                     local d = Runtime.DrawingPool[id]; if d then HideDrawing(d) end
                 else
                     local elapsed = now - cached.LastSeen
-                    if elapsed <= 1.0 then
+                    if elapsed <= 5.0 then -- 5 Seconds!
                         activeIds[id] = true
                         local isTeam = cached.Team
                         if not (Config.Visuals.TeamCheck and isTeam) then
@@ -442,21 +389,17 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
                                     local draw = GetOrCreateDrawing(id)
                                     if onScreen then
                                         local col = isTeam and Config.Visuals.TeamColor or Config.Visuals.EnemyColor
+                                        local ghostAlpha = 1 - (elapsed / 5.0) -- Fades out over 5s
+                                        
                                         if Config.Visuals.BoxESP then
-                                            draw.BoxOutline.Size = Vector2.new(width, height); draw.BoxOutline.Position = boxPos; draw.BoxOutline.Visible = true
-                                            draw.Box.Size = Vector2.new(width, height); draw.Box.Position = boxPos; draw.Box.Color = col; draw.Box.Visible = true
+                                            draw.BoxOutline.Size = Vector2.new(width, height); draw.BoxOutline.Position = boxPos; draw.BoxOutline.Transparency = 0.8 * ghostAlpha; draw.BoxOutline.Visible = true
+                                            draw.Box.Size = Vector2.new(width, height); draw.Box.Position = boxPos; draw.Box.Color = col; draw.Box.Transparency = ghostAlpha; draw.Box.Visible = true
                                         else draw.BoxOutline.Visible = false; draw.Box.Visible = false end
-                                        if Config.Visuals.HealthBar then
-                                            local ratio = math.clamp(cached.Health / cached.MaxHealth, 0, 1); local barHeight = height * ratio; local barX = boxPos.X - 5
-                                            draw.HealthOutline.From = Vector2.new(barX, boxPos.Y); draw.HealthOutline.To = Vector2.new(barX, boxPos.Y + height); draw.HealthOutline.Visible = true
-                                            draw.Health.From = Vector2.new(barX, boxPos.Y + height); draw.Health.To = Vector2.new(barX, boxPos.Y + height - barHeight); draw.Health.Color = Color3.fromHSV(ratio * 0.32, 1, 1); draw.Health.Visible = true
-                                        else draw.HealthOutline.Visible = false; draw.Health.Visible = false end
-                                        if Config.Visuals.NameESP then draw.Name.Text = cached.DisplayName; draw.Name.Position = Vector2.new(topPos.X, boxPos.Y - 14); draw.Name.Visible = true else draw.Name.Visible = false end
-                                        if Config.Visuals.DistanceESP then draw.Distance.Text = string.format("[%dm]", math.floor(dist)); draw.Distance.Position = Vector2.new(topPos.X, boxPos.Y + height + 2); draw.Distance.Visible = true else draw.Distance.Visible = false end
-                                        if Config.Visuals.Tracers then
-                                            local origin = (Config.Visuals.TracerOrigin == "Bottom") and Vector2.new(vp.X / 2, vp.Y) or center
-                                            draw.Tracer.From = origin; draw.Tracer.To = Vector2.new(topPos.X, boxPos.Y + height); draw.Tracer.Color = col; draw.Tracer.Visible = true
-                                        else draw.Tracer.Visible = false end
+                                        
+                                        if Config.Visuals.NameESP then draw.Name.Text = cached.DisplayName .. " [GHOST]"; draw.Name.Position = Vector2.new(topPos.X, boxPos.Y - 14); draw.Name.Transparency = ghostAlpha; draw.Name.Visible = true else draw.Name.Visible = false end
+                                        
+                                        draw.HealthOutline.Visible = false; draw.Health.Visible = false
+                                        draw.Distance.Visible = false; draw.Tracer.Visible = false
                                     else
                                         local d = Runtime.DrawingPool[id]; if d then HideDrawing(d) end
                                     end
@@ -530,15 +473,24 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
+    -- VIRTUAL BHOP (Simulates Spacebar)
     if Config.Movement.Bhop and UserInputService:IsKeyDown(Enum.KeyCode.Space) then
         if not UserInputService:GetFocusedTextBox() then
             local char = (Workspace:FindFirstChild("Characters") and Workspace.Characters:FindFirstChild(LocalPlayer.Name)) or LocalPlayer.Character
             local hum = char and char:FindFirstChildOfClass("Humanoid")
-            if hum and hum.FloorMaterial ~= Enum.Material.Air then hum.Jump = true end
+            if hum and hum.FloorMaterial ~= Enum.Material.Air then
+                if now - Runtime.BhopDelay > 0.1 then
+                    Runtime.BhopDelay = now
+                    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+                    task.wait(0.05)
+                    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+                end
+            end
         end
     end
 end))
 
+-- BUILD UI
 local function BuildUI()
     local Theme = {
         Background = Color3.fromRGB(15, 17, 19), Header = Color3.fromRGB(22, 25, 29), Surface = Color3.fromRGB(28, 32, 38),
@@ -554,14 +506,11 @@ local function BuildUI()
     local header = Instance.new("Frame")
     header.Name = "Header"; header.Size = UDim2.new(1, 0, 0, 42); header.BackgroundColor3 = Theme.Header; header.BorderSizePixel = 0; header.Parent = main
     local headerCorner = Instance.new("UICorner"); headerCorner.CornerRadius = UDim.new(0, 8); headerCorner.Parent = header
-    local headerBottom = Instance.new("Frame"); headerBottom.Size = UDim2.new(1, 0, 0, 8); headerBottom.Position = UDim2.new(0, 0, 1, -8); headerBottom.BackgroundColor3 = Theme.Header; headerBottom.BorderSizePixel = 0; headerBottom.Parent = header
-    
     local title = Instance.new("TextLabel")
-    title.Text = "⚡ BWX // BLOXSTRIKE (v3.12)"
+    title.Text = "⚡ BWX // BLOXSTRIKE (v3.13)"
     title.Font = Enum.Font.GothamBold; title.TextSize = 14; title.TextColor3 = Theme.Accent
     title.TextXAlignment = Enum.TextXAlignment.Left; title.BackgroundTransparency = 1
     title.Position = UDim2.new(0, 14, 0, 0); title.Size = UDim2.new(0.6, 0, 1, 0); title.Parent = header
-    
     local hint = Instance.new("TextLabel"); hint.Text = "Toggle: [K] / [Insert]"; hint.Font = Enum.Font.Gotham; hint.TextSize = 11; hint.TextColor3 = Theme.Muted; hint.TextXAlignment = Enum.TextXAlignment.Right; hint.BackgroundTransparency = 1; hint.Position = UDim2.new(0.4, 0, 0, 0); hint.Size = UDim2.new(0.56, 0, 1, 0); hint.Parent = header
     local dragging, dragStart, startPos
     header.InputBegan:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true; dragStart = input.Position; startPos = main.Position end end)
@@ -569,7 +518,6 @@ local function BuildUI()
     UserInputService.InputEnded:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end end)
     local sidebar = Instance.new("Frame"); sidebar.Size = UDim2.new(0, 130, 1, -42); sidebar.Position = UDim2.new(0, 0, 0, 42); sidebar.BackgroundColor3 = Theme.Header; sidebar.BorderSizePixel = 0; sidebar.Parent = main
     local sidebarLayout = Instance.new("UIListLayout"); sidebarLayout.Padding = UDim.new(0, 4); sidebarLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center; sidebarLayout.Parent = sidebar
-    local sidebarPadding = Instance.new("UIPadding"); sidebarPadding.PaddingTop = UDim.new(0, 8); sidebarPadding.Parent = sidebar
     local container = Instance.new("Frame"); container.Size = UDim2.new(1, -138, 1, -50); container.Position = UDim2.new(0, 134, 0, 46); container.BackgroundTransparency = 1; container.Parent = main
     local pages = {}; local tabs = {"Combat", "Visuals", "Gun Mods", "Movement"}; local activeTab = nil
     for _, name in ipairs(tabs) do
@@ -646,13 +594,11 @@ local function BuildUI()
     CreateSlider(visualsPage, "Max ESP Distance", 500, 8000, Config.Visuals.MaxDistance, "m", function(v) Config.Visuals.MaxDistance = v end)
 
     local modsPage = pages["Gun Mods"]
-    CreateToggle(modsPage, "No Recoil (Property)", Config.WeaponMods.NoRecoil, function(v) Config.WeaponMods.NoRecoil = v end)
-    CreateToggle(modsPage, "No Spread (Attribute)", Config.WeaponMods.NoSpread, function(v) Config.WeaponMods.NoSpread = v end)
-    CreateToggle(modsPage, "Auto Reload", Config.WeaponMods.AutoReload, function(v) Config.WeaponMods.AutoReload = v end)
-    CreateToggle(modsPage, "Anti-Flashbang", Config.WeaponMods.AntiFlash, function(v) Config.WeaponMods.AntiFlash = v end)
+    CreateToggle(modsPage, "No Recoil (Safe Hook)", Config.WeaponMods.NoRecoil, function(v) Config.WeaponMods.NoRecoil = v end)
+    CreateToggle(modsPage, "Anti-Flashbang (Deep Scan)", Config.WeaponMods.AntiFlash, function(v) Config.WeaponMods.AntiFlash = v end)
 
     local movePage = pages["Movement"]
-    CreateToggle(movePage, "Auto Bunnyhop (Bhop)", Config.Movement.Bhop, function(v) Config.Movement.Bhop = v end)
+    CreateToggle(movePage, "Auto Bunnyhop (Virtual Input)", Config.Movement.Bhop, function(v) Config.Movement.Bhop = v end)
     
     SwitchTab("Combat")
     UserInputService.InputBegan:Connect(function(input, processed)
@@ -670,6 +616,8 @@ env.BWXUnload = function()
     ResetAllHitboxes(); table.clear(Runtime.CachedPositions)
     for _, conn in ipairs(Runtime.Connections) do pcall(function() conn:Disconnect() end) end
     table.clear(Runtime.Connections)
+    for _, unhook in pairs(Runtime.Hooks) do pcall(unhook) end
+    table.clear(Runtime.Hooks)
     if Runtime.FOVDrawing then pcall(function() Runtime.FOVDrawing:Remove() end) end
     if Runtime.C4Drawing then pcall(function() Runtime.C4Drawing:Remove() end) end
     if Runtime.NoticeDrawing then pcall(function() Runtime.NoticeDrawing:Remove() end) end
@@ -680,4 +628,4 @@ env.BWXUnload = function()
 end
 env.BWXUnload = env.BWXUnload
 
-print("[BWX] Suite v3.12 Loaded. Clean & Stable Edition.")
+print("[BWX] Suite v3.13 Loaded. Deep Scan & Virtual Bhop.")

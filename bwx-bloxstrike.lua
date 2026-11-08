@@ -1,7 +1,8 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v4.5 Aster-Fixed)
+    ⚡ BWX // Bloxstrike Utility Suite (v4.6 Aster-Fixed)
     Target: Roblox Bloxstrike
-    Fixes: Accurate Team Check, Tracers Added, Safe No Recoil/Spread.
+    Fixes: Mouse Compensation No Recoil, Accurate Teams, Tracers.
+    Defaults: FOV 160, Hitbox 10.
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -27,8 +28,8 @@ local Config = {
         AimLock = true,
         AimLockStrength = 0.22,
         Hitbox = true,
-        HitboxSize = 8,
-        FOV = 130,
+        HitboxSize = 10, -- Updated
+        FOV = 160,       -- Updated
         ShowFOV = true,
         FOVColor = Color3.fromRGB(50, 230, 150)
     },
@@ -46,6 +47,7 @@ local Config = {
     },
     WeaponMods = {
         NoRecoil = true,
+        RecoilStrength = 1.0, -- 1.0 = 100%
         NoSpread = true,
         AntiFlash = true
     },
@@ -74,7 +76,7 @@ Runtime.FOVDrawing.Color = Config.Combat.FOVColor
 Runtime.FOVDrawing.Visible = Config.Combat.ShowFOV
 
 -- =========================================================================
--- ACCURATE TEAM CHECK (v3.14 Logic)
+-- ACCURATE TEAM CHECK
 -- =========================================================================
 local function NormalizeTeam(val)
     if val == nil then return nil end
@@ -142,10 +144,9 @@ local function IsModelDead(model, player)
 end
 
 -- =========================================================================
--- SAFE HOOKS (No Recoil via Raycast/CFrame, No Spread)
+-- NO SPREAD HOOK (Safe Raycast)
 -- =========================================================================
-local function SetupHooks()
-    -- 1. No Spread Hook (Safe Direction override)
+local function SetupNoSpread()
     local mt = getrawmetatable(game)
     local oldNamecall = mt.__namecall
     setreadonly(mt, false)
@@ -160,7 +161,6 @@ local function SetupHooks()
                 local direction = args[2]
                 if typeof(origin) == "Vector3" and typeof(direction) == "Vector3" then
                     local distToCam = (origin - Camera.CFrame.Position).Magnitude
-                    -- Only affect bullets fired near the camera
                     if distToCam < 15 then
                         args[2] = Camera.CFrame.LookVector * direction.Magnitude
                     end
@@ -176,44 +176,8 @@ local function SetupHooks()
         mt2.__namecall = oldNamecall
         setreadonly(mt2, true)
     end
-
-    -- 2. No Recoil Hook (Safe Camera Kick override)
-    local controllers = ReplicatedStorage:FindFirstChild("Controllers")
-    local camModuleScript = controllers and controllers:FindFirstChild("CameraController")
-    if camModuleScript and camModuleScript:IsA("ModuleScript") then
-        local ok, camModule = pcall(require, camModuleScript)
-        if ok and type(camModule) == "table" then
-            if type(camModule.weaponKick) == "function" and not Runtime.Hooks["weaponKick"] then
-                local oldKick = camModule.weaponKick
-                camModule.weaponKick = function(...)
-                    local result = oldKick(...)
-                    if Config.WeaponMods.NoRecoil and result then
-                        if typeof(result) == "CFrame" then 
-                            return CFrame.new(result.Position) 
-                        elseif typeof(result) == "Vector3" then 
-                            return Vector3.zero 
-                        end
-                    end
-                    return result
-                end
-                Runtime.Hooks["weaponKick"] = function() camModule.weaponKick = oldKick end
-            end
-            if type(camModule.getWeaponKickRotation) == "function" and not Runtime.Hooks["getWeaponKickRotation"] then
-                local oldRot = camModule.getWeaponKickRotation
-                camModule.getWeaponKickRotation = function(...)
-                    local result = oldRot(...)
-                    if Config.WeaponMods.NoRecoil and result then
-                        if typeof(result) == "CFrame" then return CFrame.new()
-                        elseif typeof(result) == "Vector3" then return Vector3.zero end
-                    end
-                    return result
-                end
-                Runtime.Hooks["getWeaponKickRotation"] = function() camModule.getWeaponKickRotation = oldRot end
-            end
-        end
-    end
 end
-pcall(SetupHooks)
+pcall(SetupNoSpread)
 
 -- =========================================================================
 -- DRAWINGS & TRACERS
@@ -413,6 +377,34 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
+    -- =========================================================================
+    -- NO RECOIL (Physical Mouse Compensation)
+    -- =========================================================================
+    if Config.WeaponMods.NoRecoil and isFiring and not UserInputService:GetFocusedTextBox() then
+        local curPitch, curYaw = Camera.CFrame:ToOrientation()
+        if Runtime.LastPitch and Runtime.LastYaw then
+            local dPitch = curPitch - Runtime.LastPitch
+            
+            -- If camera pitches UP (negative pitch delta)
+            if dPitch < -0.0001 then
+                local radToPixY = Camera.ViewportSize.Y / math.rad(Camera.FieldOfView)
+                local compY = -dPitch * radToPixY * Config.WeaponMods.RecoilStrength
+                
+                -- Clamp to avoid erratic snapping
+                compY = math.clamp(compY, 0, 40)
+                
+                if compY > 0.1 and mousemoverel then
+                    mousemoverel(0, compY)
+                end
+            end
+        end
+        Runtime.LastPitch = curPitch
+        Runtime.LastYaw = curYaw
+    else
+        Runtime.LastPitch = nil
+        Runtime.LastYaw = nil
+    end
+
     -- Bhop
     if Config.Movement.Bhop and UserInputService:IsKeyDown(Enum.KeyCode.Space) then
         local char = LocalPlayer.Character
@@ -426,7 +418,7 @@ end))
 -- =========================================================================
 local Window = Aster:CreateWindow({
     Title = "BWX // Bloxstrike",
-    Subtitle = "v4.5 Fixed",
+    Subtitle = "v4.6 Fixed",
     ToggleUIKeybind = "K",
     Theme = "Cybrion",
     Weather = "Matrix",
@@ -438,8 +430,8 @@ CombatTab:Toggle({ Name = "LMB Aimlock", Flag = "AimLock", Default = Config.Comb
 CombatTab:Slider({ Name = "Aim Smoothness", Flag = "AimStr", Min = 5, Max = 100, Default = 22, Suffix = "%", Callback = function(v) Config.Combat.AimLockStrength = v / 100 end })
 CombatTab:Section("Hitbox")
 CombatTab:Toggle({ Name = "Hitbox Expander", Flag = "Hitbox", Default = Config.Combat.Hitbox, Callback = function(v) Config.Combat.Hitbox = v end })
-CombatTab:Slider({ Name = "Hitbox Size", Flag = "HitboxSize", Min = 3, Max = 16, Default = 8, Suffix = " studs", Callback = function(v) Config.Combat.HitboxSize = v end })
-CombatTab:Slider({ Name = "FOV Radius", Flag = "FOV", Min = 30, Max = 400, Default = 130, Suffix = "px", Callback = function(v) Config.Combat.FOV = v end })
+CombatTab:Slider({ Name = "Hitbox Size", Flag = "HitboxSize", Min = 3, Max = 20, Default = 10, Suffix = " studs", Callback = function(v) Config.Combat.HitboxSize = v end })
+CombatTab:Slider({ Name = "FOV Radius", Flag = "FOV", Min = 30, Max = 400, Default = 160, Suffix = "px", Callback = function(v) Config.Combat.FOV = v end })
 CombatTab:Toggle({ Name = "Show FOV Circle", Flag = "ShowFOV", Default = true, Callback = function(v) Config.Combat.ShowFOV = v end })
 
 local VisualsTab = Window:Tab({ Name = "Visuals", Icon = "eye" })
@@ -454,7 +446,8 @@ VisualsTab:Slider({ Name = "Max Distance", Flag = "MaxDist", Min = 500, Max = 80
 
 local ModsTab = Window:Tab({ Name = "Gun Mods", Icon = "cog" })
 ModsTab:Section("Recoil & Spread")
-ModsTab:Toggle({ Name = "No Recoil (Safe Hook)", Flag = "NoRecoil", Default = true, Callback = function(v) Config.WeaponMods.NoRecoil = v end })
+ModsTab:Toggle({ Name = "No Recoil (Mouse Comp)", Flag = "NoRecoil", Default = true, Callback = function(v) Config.WeaponMods.NoRecoil = v end })
+ModsTab:Slider({ Name = "Recoil Strength", Flag = "RecoilStr", Min = 10, Max = 100, Default = 100, Suffix = "%", Callback = function(v) Config.WeaponMods.RecoilStrength = v / 100 end })
 ModsTab:Toggle({ Name = "No Spread (Safe Raycast)", Flag = "NoSpread", Default = true, Callback = function(v) Config.WeaponMods.NoSpread = v end })
 ModsTab:Section("Misc")
 ModsTab:Toggle({ Name = "Anti-Flashbang", Flag = "AntiFlash", Default = true, Callback = function(v) Config.WeaponMods.AntiFlash = v end })
@@ -478,4 +471,4 @@ env.BWXUnload = function()
 end
 env.BWXUnload = env.BWXUnload
 
-print("[BWX] Suite v4.5 Loaded. Accurate Teams, Tracers & Safe Hooks.")
+print("[BWX] Suite v4.6 Loaded. Mouse Comp No Recoil & Fixed ESP.")

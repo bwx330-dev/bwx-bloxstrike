@@ -1,8 +1,7 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v4.8 Aster-Final)
+    ⚡ BWX // Bloxstrike Utility Suite (v6.1 Aster-Performance)
     Target: Roblox Bloxstrike
-    Fixes: True Pitch Lock (BindToRenderStep), Accurate Teams, Tracers.
-    Defaults: FOV 160, Hitbox 10.
+    Fixes: Optimized No Smoke (DescendantAdded), FPS drop resolved.
 ]]
 
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -12,7 +11,6 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local Lighting = game:GetService("Lighting")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CoreGui = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer
@@ -28,8 +26,8 @@ local Config = {
         AimLock = true,
         AimLockStrength = 0.22,
         Hitbox = true,
-        HitboxSize = 10, -- Default 10
-        FOV = 160,       -- Default 160
+        HitboxSize = 10,
+        FOV = 160,
         ShowFOV = true,
         FOVColor = Color3.fromRGB(50, 230, 150)
     },
@@ -38,6 +36,7 @@ local Config = {
         TeamCheck = true,
         BoxESP = true,
         Tracers = true,
+        NoSmoke = true,
         EnemyColor = Color3.fromRGB(245, 75, 75),
         TeamColor = Color3.fromRGB(65, 150, 255),
         NameESP = true,
@@ -61,7 +60,10 @@ local Runtime = {
     TargetPart = nil,
     Connections = {},
     Hooks = {},
-    LockedPitch = nil
+    LockCamera = false,
+    LockedCFrame = nil,
+    IsAimlocking = false,
+    IsUpdating = false
 }
 
 Runtime.FOVDrawing = Drawing.new("Circle")
@@ -142,57 +144,81 @@ local function IsModelDead(model, player)
 end
 
 -- =========================================================================
--- NO SPREAD HOOK (Safe Raycast)
+-- OPTIMIZED NO SMOKE (Event-Driven)
 -- =========================================================================
-local function SetupNoSpread()
+local function ClearSmoke(obj)
+    if not Config.Visuals.NoSmoke then return end
+    if obj:IsA("Smoke") or obj:IsA("ParticleEmitter") and obj.Name:lower():find("smoke") then
+        obj.Enabled = false
+    end
+end
+
+-- Initial sweep (only once)
+for _, obj in ipairs(Workspace:GetDescendants()) do ClearSmoke(obj) end
+
+-- Event listener for new objects
+table.insert(Runtime.Connections, Workspace.DescendantAdded:Connect(ClearSmoke))
+
+-- =========================================================================
+-- SAFE METAMETHOD HOOKS
+-- =========================================================================
+local function SetupHooks()
     local mt = getrawmetatable(game)
     local oldNamecall = mt.__namecall
+    local oldNewIndex = mt.__newindex
     setreadonly(mt, false)
     
+    -- No Spread (Safe Raycast)
     mt.__namecall = newcclosure(function(self, ...)
         local method = getnamecallmethod()
         local args = {...}
-        
         if method == "Raycast" and self == Workspace then
             if Config.WeaponMods.NoSpread then
                 local origin = args[1]
                 local direction = args[2]
                 if typeof(origin) == "Vector3" and typeof(direction) == "Vector3" then
-                    local distToCam = (origin - Camera.CFrame.Position).Magnitude
+                    local distToCam = (origin - Workspace.CurrentCamera.CFrame.Position).Magnitude
                     if distToCam < 15 then
-                        args[2] = Camera.CFrame.LookVector * direction.Magnitude
+                        args[2] = Workspace.CurrentCamera.CFrame.LookVector * direction.Magnitude
                     end
                 end
             end
         end
         return oldNamecall(self, unpack(args))
     end)
+
+    -- No Recoil (Position Decoupling)
+    mt.__newindex = newcclosure(function(self, key, value)
+        if self == Workspace.CurrentCamera and key == "CFrame" and Runtime.LockCamera and not Runtime.IsUpdating then
+            if Runtime.IsAimlocking then
+                Runtime.LockedCFrame = value
+                return oldNewIndex(self, key, value)
+            else
+                if Runtime.LockedCFrame then
+                    local lockX, lockY, _ = Runtime.LockedCFrame:ToEulerAnglesYXZ()
+                    local newVal = CFrame.new(value.Position) * CFrame.fromEulerAnglesYXZ(lockX, lockY, 0)
+                    
+                    Runtime.IsUpdating = true
+                    oldNewIndex(self, key, newVal)
+                    Runtime.IsUpdating = false
+                    return
+                end
+            end
+        end
+        return oldNewIndex(self, key, value)
+    end)
+    
     setreadonly(mt, true)
-    Runtime.Hooks["namecall"] = function()
+    
+    Runtime.Hooks["cleanup_mt"] = function()
         local mt2 = getrawmetatable(game)
         setreadonly(mt2, false)
         mt2.__namecall = oldNamecall
+        mt2.__newindex = oldNewIndex
         setreadonly(mt2, true)
     end
 end
-pcall(SetupNoSpread)
-
--- =========================================================================
--- TRUE PITCH LOCK (No Recoil)
--- =========================================================================
-RunService:BindToRenderStep("BWX_PitchLock", Enum.RenderPriority.Camera.Value + 1, function()
-    if Config.WeaponMods.NoRecoil and UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) and not UserInputService:GetFocusedTextBox() then
-        if not Runtime.LockedPitch then
-            local x, y, z = Camera.CFrame:ToEulerAnglesYXZ()
-            Runtime.LockedPitch = x
-        end
-        local _, curYaw, _ = Camera.CFrame:ToEulerAnglesYXZ()
-        -- Force camera pitch to stay locked, only allow yaw (horizontal look)
-        Camera.CFrame = CFrame.new(Camera.CFrame.Position) * CFrame.fromEulerAnglesYXZ(Runtime.LockedPitch, curYaw, 0)
-    else
-        Runtime.LockedPitch = nil
-    end
-end)
+pcall(SetupHooks)
 
 -- =========================================================================
 -- DRAWINGS & TRACERS
@@ -232,10 +258,10 @@ local function DestroyAll(d)
 end
 
 -- =========================================================================
--- RENDER LOOP (Aimlock & ESP)
+-- RENDER LOOP (Optimized)
 -- =========================================================================
 table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
-    local vp = Camera.ViewportSize
+    local vp = Workspace.CurrentCamera.ViewportSize
     local center = Vector2.new(vp.X/2, vp.Y/2)
     local activeIds = {}
     
@@ -273,7 +299,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
                         local id = model.Name
                         activeIds[id] = true
                         local isTeam = IsTeammate(model, player)
-                        local dist = (root.Position - Camera.CFrame.Position).Magnitude
+                        local dist = (root.Position - Workspace.CurrentCamera.CFrame.Position).Magnitude
                         local hp = (hum and hum.Health) or tonumber(model:GetAttribute("Health")) or 100
                         local maxHp = (hum and hum.MaxHealth) or tonumber(model:GetAttribute("MaxHealth")) or 100
                         local displayName = (player and player.DisplayName) or model.Name
@@ -290,8 +316,8 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
 
                         -- ESP Render
                         if Config.Visuals.Enabled and not (Config.Visuals.TeamCheck and isTeam) and dist <= Config.Visuals.MaxDistance then
-                            local topPos, onTop = Camera:WorldToViewportPoint(root.Position + Vector3.new(0, 3, 0))
-                            local botPos, onBot = Camera:WorldToViewportPoint(root.Position - Vector3.new(0, 3.5, 0))
+                            local topPos, onTop = Workspace.CurrentCamera:WorldToViewportPoint(root.Position + Vector3.new(0, 3, 0))
+                            local botPos, onBot = Workspace.CurrentCamera:WorldToViewportPoint(root.Position - Vector3.new(0, 3.5, 0))
                             
                             if onTop and onBot and topPos.Z > 0 and botPos.Z > 0 then
                                 local height = math.abs(botPos.Y - topPos.Y)
@@ -341,7 +367,7 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
 
                         -- Aimlock Target Selection
                         if Config.Combat.AimLock and not isTeam then
-                            local partScreen, partOn = Camera:WorldToViewportPoint(head.Position)
+                            local partScreen, partOn = Workspace.CurrentCamera:WorldToViewportPoint(head.Position)
                             if partOn and partScreen.Z > 0 then
                                 local sDist = (Vector2.new(partScreen.X, partScreen.Y) - center).Magnitude
                                 if sDist < bestScreenDist then
@@ -373,23 +399,30 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
     end
 
     Runtime.TargetPart = bestHitPart
-
-    -- LMB Aimlock
     local isFiring = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
-    if Config.Combat.AimLock and Runtime.TargetPart and not UserInputService:GetFocusedTextBox() then
-        if isFiring then
-            if UserInputService.MouseBehavior ~= Enum.MouseBehavior.LockCenter then 
-                pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter end) 
-            end
-            local targetPos = Runtime.TargetPart.Position
-            local screenPos, onScreen = Camera:WorldToViewportPoint(targetPos)
-            if onScreen and screenPos.Z > 0 then
-                local delta = Vector2.new(screenPos.X - center.X, screenPos.Y - center.Y)
-                if mousemoverel then
-                    mousemoverel(delta.X * Config.Combat.AimLockStrength, delta.Y * Config.Combat.AimLockStrength)
-                end
-            end
+
+    -- =========================================================================
+    -- AIMLOCK
+    -- =========================================================================
+    if Config.Combat.AimLock and Runtime.TargetPart and isFiring and not UserInputService:GetFocusedTextBox() then
+        Runtime.IsAimlocking = true
+        local targetPos = Runtime.TargetPart.Position
+        local aimCF = CFrame.lookAt(Workspace.CurrentCamera.CFrame.Position, targetPos)
+        Workspace.CurrentCamera.CFrame = Workspace.CurrentCamera.CFrame:Lerp(aimCF, Config.Combat.AimLockStrength)
+        Runtime.IsAimlocking = false
+    end
+
+    -- =========================================================================
+    -- NO RECOIL CAMERA LOCK
+    -- =========================================================================
+    if Config.WeaponMods.NoRecoil and isFiring and not UserInputService:GetFocusedTextBox() then
+        if not Runtime.LockCamera then
+            Runtime.LockedCFrame = Workspace.CurrentCamera.CFrame
+            Runtime.LockCamera = true
         end
+    else
+        Runtime.LockCamera = false
+        Runtime.LockedCFrame = nil
     end
 
     -- Bhop
@@ -401,11 +434,11 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
 end))
 
 -- =========================================================================
--- ASTER UI
+-- ASTER UI & UNLOAD
 -- =========================================================================
 local Window = Aster:CreateWindow({
     Title = "BWX // Bloxstrike",
-    Subtitle = "v4.8 Aster-Final",
+    Subtitle = "v6.1 Aster-Performance",
     ToggleUIKeybind = "K",
     Theme = "Cybrion",
     Weather = "Matrix",
@@ -430,18 +463,25 @@ VisualsTab:Toggle({ Name = "Health Bar", Flag = "HealthBar", Default = true, Cal
 VisualsTab:Toggle({ Name = "Name Tags", Flag = "NameESP", Default = true, Callback = function(v) Config.Visuals.NameESP = v end })
 VisualsTab:Toggle({ Name = "Distance Tag", Flag = "DistanceESP", Default = true, Callback = function(v) Config.Visuals.DistanceESP = v end })
 VisualsTab:Slider({ Name = "Max Distance", Flag = "MaxDist", Min = 500, Max = 8000, Default = 5000, Suffix = "m", Callback = function(v) Config.Visuals.MaxDistance = v end })
+VisualsTab:Section("World")
+VisualsTab:Toggle({ Name = "No Smoke (Event-Driven)", Flag = "NoSmoke", Default = true, Callback = function(v) Config.Visuals.NoSmoke = v end })
 
 local ModsTab = Window:Tab({ Name = "Gun Mods", Icon = "cog" })
 ModsTab:Section("Recoil & Spread")
-ModsTab:Toggle({ Name = "No Recoil (Pitch Lock)", Flag = "NoRecoil", Default = true, Callback = function(v) Config.WeaponMods.NoRecoil = v end })
+ModsTab:Toggle({ Name = "No Recoil (Full Lock)", Flag = "NoRecoil", Default = true, Callback = function(v) Config.WeaponMods.NoRecoil = v end })
 ModsTab:Toggle({ Name = "No Spread (Safe Raycast)", Flag = "NoSpread", Default = true, Callback = function(v) Config.WeaponMods.NoSpread = v end })
 ModsTab:Section("Misc")
 ModsTab:Toggle({ Name = "Anti-Flashbang", Flag = "AntiFlash", Default = true, Callback = function(v) Config.WeaponMods.AntiFlash = v end })
 ModsTab:Toggle({ Name = "Auto Bunnyhop", Flag = "Bhop", Default = true, Callback = function(v) Config.Movement.Bhop = v end })
 
+local MiscTab = Window:Tab({ Name = "Misc", Icon = "cog" })
+MiscTab:Button({ Name = "UNLOAD SCRIPT (RightShift)", Callback = function() 
+    if env.BWXUnload then env.BWXUnload() end 
+end })
+
+-- Cleanup Function
 env.BWXUnload = function()
     Runtime.Active = false
-    RunService:UnbindFromRenderStep("BWX_PitchLock")
     for _, conn in ipairs(Runtime.Connections) do pcall(function() conn:Disconnect() end) end
     table.clear(Runtime.Connections)
     for _, unhook in pairs(Runtime.Hooks) do pcall(unhook) end
@@ -454,8 +494,20 @@ env.BWXUnload = function()
     end
     table.clear(Runtime.OriginalSizes)
     if Aster and Aster.Destroy then pcall(function() Aster:Destroy() end) end
+    
+    local sg = game:GetService("CoreGui"):FindFirstChild("AsterUI") or LocalPlayer:WaitForChild("PlayerGui"):FindFirstChild("AsterUI")
+    if sg then sg:Destroy() end
+    
+    print("[BWX] Unloaded Successfully.")
     env.BWXUnload = nil
 end
 env.BWXUnload = env.BWXUnload
 
-print("[BWX] Suite v4.8 Loaded. True Pitch Lock & Fixed ESP.")
+-- Unload Keybind
+UserInputService.InputBegan:Connect(function(input, processed)
+    if not processed and input.KeyCode == Enum.KeyCode.RightShift then
+        if env.BWXUnload then env.BWXUnload() end
+    end
+end)
+
+print("[BWX] Suite v6.1 Loaded. Performance Fixed.")

@@ -1,7 +1,7 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v4.6 Aster-Fixed)
+    ⚡ BWX // Bloxstrike Utility Suite (v4.7 Aster-Fixed)
     Target: Roblox Bloxstrike
-    Fixes: Mouse Compensation No Recoil, Accurate Teams, Tracers.
+    Fixes: Pitch Lock No Recoil, Accurate Teams, Tracers.
     Defaults: FOV 160, Hitbox 10.
 ]]
 
@@ -28,8 +28,8 @@ local Config = {
         AimLock = true,
         AimLockStrength = 0.22,
         Hitbox = true,
-        HitboxSize = 10, -- Updated
-        FOV = 160,       -- Updated
+        HitboxSize = 10, -- Default 10
+        FOV = 160,       -- Default 160
         ShowFOV = true,
         FOVColor = Color3.fromRGB(50, 230, 150)
     },
@@ -47,7 +47,6 @@ local Config = {
     },
     WeaponMods = {
         NoRecoil = true,
-        RecoilStrength = 1.0, -- 1.0 = 100%
         NoSpread = true,
         AntiFlash = true
     },
@@ -62,8 +61,7 @@ local Runtime = {
     TargetPart = nil,
     Connections = {},
     Hooks = {},
-    LastPitch = nil,
-    LastYaw = nil
+    LockPitch = nil
 }
 
 Runtime.FOVDrawing = Drawing.new("Circle")
@@ -378,31 +376,22 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
     end
 
     -- =========================================================================
-    -- NO RECOIL (Physical Mouse Compensation)
+    -- NO RECOIL (Pitch Lock)
     -- =========================================================================
-    if Config.WeaponMods.NoRecoil and isFiring and not UserInputService:GetFocusedTextBox() then
-        local curPitch, curYaw = Camera.CFrame:ToOrientation()
-        if Runtime.LastPitch and Runtime.LastYaw then
-            local dPitch = curPitch - Runtime.LastPitch
-            
-            -- If camera pitches UP (negative pitch delta)
-            if dPitch < -0.0001 then
-                local radToPixY = Camera.ViewportSize.Y / math.rad(Camera.FieldOfView)
-                local compY = -dPitch * radToPixY * Config.WeaponMods.RecoilStrength
-                
-                -- Clamp to avoid erratic snapping
-                compY = math.clamp(compY, 0, 40)
-                
-                if compY > 0.1 and mousemoverel then
-                    mousemoverel(0, compY)
-                end
+    if Config.WeaponMods.NoRecoil then
+        if isFiring and not UserInputService:GetFocusedTextBox() then
+            if not Runtime.LockPitch then
+                -- Store current pitch when starting to fire
+                local x, _, _ = Camera.CFrame:ToEulerAnglesYXZ()
+                Runtime.LockPitch = x
             end
+            
+            -- Reapply pitch lock
+            local _, curYaw, _ = Camera.CFrame:ToEulerAnglesYXZ()
+            Camera.CFrame = CFrame.new(Camera.CFrame.Position) * CFrame.fromEulerAnglesYXZ(Runtime.LockPitch, curYaw, 0)
+        else
+            Runtime.LockPitch = nil
         end
-        Runtime.LastPitch = curPitch
-        Runtime.LastYaw = curYaw
-    else
-        Runtime.LastPitch = nil
-        Runtime.LastYaw = nil
     end
 
     -- Bhop
@@ -418,7 +407,7 @@ end))
 -- =========================================================================
 local Window = Aster:CreateWindow({
     Title = "BWX // Bloxstrike",
-    Subtitle = "v4.6 Fixed",
+    Subtitle = "v4.7 Aster-Fixed",
     ToggleUIKeybind = "K",
     Theme = "Cybrion",
     Weather = "Matrix",
@@ -446,8 +435,7 @@ VisualsTab:Slider({ Name = "Max Distance", Flag = "MaxDist", Min = 500, Max = 80
 
 local ModsTab = Window:Tab({ Name = "Gun Mods", Icon = "cog" })
 ModsTab:Section("Recoil & Spread")
-ModsTab:Toggle({ Name = "No Recoil (Mouse Comp)", Flag = "NoRecoil", Default = true, Callback = function(v) Config.WeaponMods.NoRecoil = v end })
-ModsTab:Slider({ Name = "Recoil Strength", Flag = "RecoilStr", Min = 10, Max = 100, Default = 100, Suffix = "%", Callback = function(v) Config.WeaponMods.RecoilStrength = v / 100 end })
+ModsTab:Toggle({ Name = "No Recoil (Pitch Lock)", Flag = "NoRecoil", Default = true, Callback = function(v) Config.WeaponMods.NoRecoil = v end })
 ModsTab:Toggle({ Name = "No Spread (Safe Raycast)", Flag = "NoSpread", Default = true, Callback = function(v) Config.WeaponMods.NoSpread = v end })
 ModsTab:Section("Misc")
 ModsTab:Toggle({ Name = "Anti-Flashbang", Flag = "AntiFlash", Default = true, Callback = function(v) Config.WeaponMods.AntiFlash = v end })
@@ -471,4 +459,4 @@ env.BWXUnload = function()
 end
 env.BWXUnload = env.BWXUnload
 
-print("[BWX] Suite v4.6 Loaded. Mouse Comp No Recoil & Fixed ESP.")
+print("[BWX] Suite v4.7 Loaded. Pitch Lock Recoil & Fixed ESP.")

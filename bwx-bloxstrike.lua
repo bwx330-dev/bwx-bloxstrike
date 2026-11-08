@@ -1,7 +1,7 @@
 --[[
-    ⚡ BWX // Bloxstrike Utility Suite (v4.7 Aster-Fixed)
+    ⚡ BWX // Bloxstrike Utility Suite (v4.8 Aster-Final)
     Target: Roblox Bloxstrike
-    Fixes: Pitch Lock No Recoil, Accurate Teams, Tracers.
+    Fixes: True Pitch Lock (BindToRenderStep), Accurate Teams, Tracers.
     Defaults: FOV 160, Hitbox 10.
 ]]
 
@@ -61,7 +61,7 @@ local Runtime = {
     TargetPart = nil,
     Connections = {},
     Hooks = {},
-    LockPitch = nil
+    LockedPitch = nil
 }
 
 Runtime.FOVDrawing = Drawing.new("Circle")
@@ -178,6 +178,23 @@ end
 pcall(SetupNoSpread)
 
 -- =========================================================================
+-- TRUE PITCH LOCK (No Recoil)
+-- =========================================================================
+RunService:BindToRenderStep("BWX_PitchLock", Enum.RenderPriority.Camera.Value + 1, function()
+    if Config.WeaponMods.NoRecoil and UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) and not UserInputService:GetFocusedTextBox() then
+        if not Runtime.LockedPitch then
+            local x, y, z = Camera.CFrame:ToEulerAnglesYXZ()
+            Runtime.LockedPitch = x
+        end
+        local _, curYaw, _ = Camera.CFrame:ToEulerAnglesYXZ()
+        -- Force camera pitch to stay locked, only allow yaw (horizontal look)
+        Camera.CFrame = CFrame.new(Camera.CFrame.Position) * CFrame.fromEulerAnglesYXZ(Runtime.LockedPitch, curYaw, 0)
+    else
+        Runtime.LockedPitch = nil
+    end
+end)
+
+-- =========================================================================
 -- DRAWINGS & TRACERS
 -- =========================================================================
 local function GetDrawings(id)
@@ -215,7 +232,7 @@ local function DestroyAll(d)
 end
 
 -- =========================================================================
--- RENDER LOOP
+-- RENDER LOOP (Aimlock & ESP)
 -- =========================================================================
 table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
     local vp = Camera.ViewportSize
@@ -375,25 +392,6 @@ table.insert(Runtime.Connections, RunService.RenderStepped:Connect(function()
         end
     end
 
-    -- =========================================================================
-    -- NO RECOIL (Pitch Lock)
-    -- =========================================================================
-    if Config.WeaponMods.NoRecoil then
-        if isFiring and not UserInputService:GetFocusedTextBox() then
-            if not Runtime.LockPitch then
-                -- Store current pitch when starting to fire
-                local x, _, _ = Camera.CFrame:ToEulerAnglesYXZ()
-                Runtime.LockPitch = x
-            end
-            
-            -- Reapply pitch lock
-            local _, curYaw, _ = Camera.CFrame:ToEulerAnglesYXZ()
-            Camera.CFrame = CFrame.new(Camera.CFrame.Position) * CFrame.fromEulerAnglesYXZ(Runtime.LockPitch, curYaw, 0)
-        else
-            Runtime.LockPitch = nil
-        end
-    end
-
     -- Bhop
     if Config.Movement.Bhop and UserInputService:IsKeyDown(Enum.KeyCode.Space) then
         local char = LocalPlayer.Character
@@ -407,7 +405,7 @@ end))
 -- =========================================================================
 local Window = Aster:CreateWindow({
     Title = "BWX // Bloxstrike",
-    Subtitle = "v4.7 Aster-Fixed",
+    Subtitle = "v4.8 Aster-Final",
     ToggleUIKeybind = "K",
     Theme = "Cybrion",
     Weather = "Matrix",
@@ -443,6 +441,7 @@ ModsTab:Toggle({ Name = "Auto Bunnyhop", Flag = "Bhop", Default = true, Callback
 
 env.BWXUnload = function()
     Runtime.Active = false
+    RunService:UnbindFromRenderStep("BWX_PitchLock")
     for _, conn in ipairs(Runtime.Connections) do pcall(function() conn:Disconnect() end) end
     table.clear(Runtime.Connections)
     for _, unhook in pairs(Runtime.Hooks) do pcall(unhook) end
@@ -459,4 +458,4 @@ env.BWXUnload = function()
 end
 env.BWXUnload = env.BWXUnload
 
-print("[BWX] Suite v4.7 Loaded. Pitch Lock Recoil & Fixed ESP.")
+print("[BWX] Suite v4.8 Loaded. True Pitch Lock & Fixed ESP.")
